@@ -1,0 +1,37 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Fases 4-5: los dos conectores de cámara usan el driver propio imx296_mipi.
+ *   CAM1 = sensor0 (bus 11, pwdn PE6)  -> "imx296_mipi"   (instancia 1)
+ *   CAM2 = sensor2 (bus 9,  pwdn PE10) -> "imx296_mipi_2" (instancia 2)
+ *
+ * Reemplaza a imx296-vin-cam2 (solo CAM2). Ventajas:
+ *  - Quita el driver imx219 de CAM1, que al cargar VIN enciende MCLK de 24 MHz en PE5
+ *    (pin 18 = CAM_IO1), línea que en la cámara GS puede llegar a XTR.
+ *  - Con CAM1 vacío, VIN descarta sensor0 ("No such device") igual que hacía con imx219.
+ *  - Al conectar la segunda cámara no hay que tocar /boot.
+ *
+ * Los mname deben coincidir con SENSOR_NAME / SENSOR_NAME_2 del driver; twi_addr en
+ * 8 bits (VIN hace >> 1 -> 0x1a). El resto de cada nodo no cambia.
+ *
+ * Compilar en la placa: dtc -@ -I dts -O dtb -o imx296-vin.dtbo imx296-vin.dts
+ */
+/dts-v1/;
+/plugin/;
+
+/ {
+	fragment@0 {
+		target = <&sensor0>;
+		__overlay__ {
+			sensor0_mname = "imx296_mipi";
+			sensor0_twi_addr = <0x34>;
+		};
+	};
+
+	fragment@1 {
+		target = <&sensor2>;
+		__overlay__ {
+			sensor2_mname = "imx296_mipi_2";
+			sensor2_twi_addr = <0x34>;
+		};
+	};
+};

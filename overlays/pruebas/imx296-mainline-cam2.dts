@@ -1,0 +1,51 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Fase 3, prueba 1: declarar la IMX296 en el bus I2C de CAM2 para el driver
+ * del kernel principal (drivers/media/i2c/imx296.c, compatible "sony,imx296").
+ *
+ * - Reloj: la cámara GS trae su propio oscilador de 54 MHz; el driver exige un
+ *   reloj "inck" para elegir la tabla INCKSEL, así que se declara un fixed-clock
+ *   de 54 MHz (no genera ninguna señal, solo informa la frecuencia).
+ * - reset-gpios: PE10 = CAM_IO0 del conector CAM2 (esquemático, hoja 13).
+ *   El driver pone reset = 0 (desactivado) al encender; con GPIO_ACTIVE_LOW
+ *   eso deja PE10 en alto, igual que en la prueba de la Fase 2.
+ * - Sin reguladores: el driver usa reguladores ficticios (la cámara toma 3,3 V
+ *   directo de DCDC1).
+ * - Sin port/endpoint: VIN no usa el enlace de medios estándar; esta prueba
+ *   solo busca que el driver identifique el sensor.
+ *
+ * Compilar en la placa: dtc -@ -I dts -O dtb -o imx296-mainline-cam2.dtbo imx296-mainline-cam2.dts
+ */
+/dts-v1/;
+/plugin/;
+
+/ {
+	fragment@0 {
+		target-path = "/";
+		__overlay__ {
+			imx296_inck: imx296-inck {
+				compatible = "fixed-clock";
+				#clock-cells = <0>;
+				clock-frequency = <54000000>;
+			};
+		};
+	};
+
+	fragment@1 {
+		target = <&twi9>;
+		__overlay__ {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			imx296@1a {
+				compatible = "sony,imx296";
+				reg = <0x1a>;
+				clocks = <&imx296_inck>;
+				clock-names = "inck";
+				/* &pio, banco E (4), pin 10 */
+				reset-gpios = <&pio 4 10 1>;	/* 1 = GPIO_ACTIVE_LOW */
+				status = "okay";
+			};
+		};
+	};
+};

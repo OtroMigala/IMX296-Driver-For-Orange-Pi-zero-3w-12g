@@ -1,0 +1,20 @@
+# Resultados de compilación
+build/salida/
+*.ko
+*.o
+*.mod
+*.mod.c
+*.cmd
+Module.symvers
+modules.order
+*.dtbo
+
+# Paquete de headers de la imagen (se copia desde la placa, ver README)
+build/*.deb
+
+# Fuentes de terceros (las descarga scripts/01_fetch_sources.sh)
+fuentes/
+
+# Capturas
+*.raw
+*.gray8

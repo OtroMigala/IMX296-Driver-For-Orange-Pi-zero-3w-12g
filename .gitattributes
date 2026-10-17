@@ -1,0 +1,3 @@
+# Los scripts y fuentes se usan en Linux (placa y contenedor Docker): siempre LF,
+# también al clonar en Windows (Git for Windows trae core.autocrlf=true).
+* text=auto eol=lf
