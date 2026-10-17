@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Fase 4: el nodo VIN sensor2 (conector CAM2, bus 9, pwdn PE10) pasa a usar el
- * driver propio imx296_mipi (segunda instancia: "imx296_mipi_2").
+ * Solo CAM2: el nodo VIN sensor2 (conector CAM2, bus 9, pwdn PE10) pasa a usar el
+ * driver imx296_mipi (segunda instancia: "imx296_mipi_2"); CAM1 queda con imx219.
+ * Se prefiere imx296-vin.dts, que además deja de encender MCLK en CAM1.
  *
  * - sensor2_mname debe coincidir con SENSOR_NAME_2 de driver/imx296_mipi.c:
  *   VIN crea el cliente I2C con ese nombre.

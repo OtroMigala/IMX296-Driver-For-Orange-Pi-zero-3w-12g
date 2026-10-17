@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Fase 2 (en la Orange Pi): ¿la IMX296 responde por I2C? No requiere driver.
-# Uso: sudo ./03_hito1_i2c.sh <bus_i2c> <pin>     ej: sudo ./03_hito1_i2c.sh 11 PE6   (CAM1)
-#                                                     sudo ./03_hito1_i2c.sh 9 PE10   (CAM2)
+# En la placa: ¿la IMX296 responde por I2C? No requiere driver. Enciende la cámara con
+# su pin, la saca de standby y lee SENSOR_INFO (modelo y variante mono/color).
+# Uso: sudo ./prueba_i2c.sh <bus_i2c> <pin>     ej: sudo ./prueba_i2c.sh 11 PE6   (CAM1)
+#                                                   sudo ./prueba_i2c.sh 9 PE10   (CAM2)
 # Importante: arrancar SIN haber ejecutado "modprobe vin_v4l2".
 set -u
 BUS="${1:-11}"
@@ -48,9 +49,9 @@ VAL=$(( (HI << 8) | LO ))
 MODELO=$(( (VAL >> 6) & 0x1ff ))
 printf "SENSOR_INFO = 0x%04x  ->  modelo = %d\n" "$VAL" "$MODELO"
 case "$VAL" in
-  $((0x4a00))) echo "RESULTADO: IMX296LQ (color). Hardware OK, pasar a la Fase 3." ;;
-  $((0xca00))) echo "RESULTADO: IMX296LL (mono). Hardware OK, pasar a la Fase 3." ;;
-  *) [ "$MODELO" -eq 296 ] && echo "RESULTADO: IMX296 detectada (variante 0x$(printf %04x $VAL))." || echo "RESULTADO: valor inesperado; anotar en la bitácora." ;;
+  $((0x4a00))) echo "RESULTADO: IMX296LQ (color). Hardware OK." ;;
+  $((0xca00))) echo "RESULTADO: IMX296LL (mono). Hardware OK." ;;
+  *) [ "$MODELO" -eq 296 ] && echo "RESULTADO: IMX296 detectada (variante 0x$(printf %04x $VAL))." || echo "RESULTADO: valor inesperado (no es una IMX296)." ;;
 esac
 
 # Devolver el sensor a standby

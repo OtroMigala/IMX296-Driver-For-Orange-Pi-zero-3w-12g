@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Fase 0 (en el PC): descarga solo lo necesario para el port.
-# Uso: ./01_fetch_sources.sh [rama]
+# En el PC: descarga solo lo necesario para compilar y estudiar el driver (en fuentes/).
+# Uso: ./descargar_fuentes.sh [rama]
 #   rama por defecto: orange-pi-6.6-sun60iw2  (usar orange-pi-5.15-sun60iw2 si uname -r en la placa es 5.15.x)
 set -euo pipefail
 # En Git Bash (Windows) evita que MSYS convierta "/bsp/..." en "C:/Program Files/Git/bsp/..."

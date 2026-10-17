@@ -1,0 +1,39 @@
+Integración de imx296_mipi en el árbol del kernel de Orange Pi (rama orange-pi-6.6-sun60iw2).
+
+Solo hace falta para compilar el driver junto con el kernel completo; la compilación
+fuera del árbol (build/compilar.ps1, build/compilar_linux.sh) no lo usa.
+
+Uso, desde la raíz del kernel:
+  cp <este repo>/driver/imx296_mipi.c bsp/drivers/vin/modules/sensor/
+  git apply <este repo>/driver/integracion_vin.patch
+  # luego activar CONFIG_SENSOR_IMX296_MIPI=m (menuconfig o el defconfig de la placa)
+
+Probado con git apply sobre los commits 8a9be72 y 2ac08e8c de la rama.
+
+diff --git a/bsp/drivers/vin/modules/sensor/Kconfig b/bsp/drivers/vin/modules/sensor/Kconfig
+index 2163e25..26e7d98 100644
+--- a/bsp/drivers/vin/modules/sensor/Kconfig
++++ b/bsp/drivers/vin/modules/sensor/Kconfig
+@@ -128,6 +128,10 @@ config SENSOR_IMX219
+ 	tristate "use imx219 driver"
+ 	default n
+ 
++config SENSOR_IMX296_MIPI
++	tristate "use imx296_mipi driver (Raspberry Pi Global Shutter Camera)"
++	default n
++
+ config SENSOR_IMX274_SLVDS
+ 	tristate "use imx274_slvds driver"
+ 	default n
+diff --git a/bsp/drivers/vin/modules/sensor/Makefile b/bsp/drivers/vin/modules/sensor/Makefile
+index 47a446f..ebf12d0 100644
+--- a/bsp/drivers/vin/modules/sensor/Makefile
++++ b/bsp/drivers/vin/modules/sensor/Makefile
+@@ -30,6 +30,7 @@ obj-$(CONFIG_SENSOR_GC2590)			+= gc2590_mipi.o
+ obj-$(CONFIG_SENSOR_SP5409)			+= sp5409_mipi.o
+ obj-$(CONFIG_SENSOR_IMX214)			+= imx214.o
+ obj-$(CONFIG_SENSOR_IMX219)			+= imx219.o
++obj-$(CONFIG_SENSOR_IMX296_MIPI)		+= imx296_mipi.o
+ obj-$(CONFIG_SENSOR_IMX274_SLVDS)		+= imx274_slvds.o
+ obj-$(CONFIG_SENSOR_IMX291_DVP)			+= imx291_dvp.o
+ obj-$(CONFIG_SENSOR_IMX291)			+= imx291_mipi.o

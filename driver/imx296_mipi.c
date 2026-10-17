@@ -22,8 +22,13 @@
  *   v2 (2026-10-17): parámetros rotation (180 por defecto, como Raspberry Pi),
  *       exposure_us y gain_db10; la exposición y la ganancia vigentes se aplican
  *       después de la tabla al arrancar la captura en lugar de quedar fijas en ella.
+ *   v2.1 (2026-10-17): limpieza sin cambios de comportamiento: parámetros con
+ *       rango validado, mensajes del log en inglés y con niveles coherentes,
+ *       códigos de error uniformes, estilo según checkpatch.pl. Solo kernel 6.6
+ *       (se quitan las ramas LINUX_VERSION_CODE heredadas de imx219.c) y salida
+ *       limpia en probe/remove si el nombre del cliente I2C no es de este driver.
  *
- * Uso con VIN (ver scripts/04_fase4_pasos.sh): cargar vin_io, este módulo y luego
+ * Uso con VIN (ver scripts/placa/captura.sh): cargar vin_io, este módulo y luego
  * vin_v4l2, y hacer VIDIOC_S_INPUT en la misma sesión que captura.
  */
 #include "../../utility/vin_log.h"
@@ -44,9 +49,48 @@ MODULE_AUTHOR("Proyecto Ticanor");
 MODULE_DESCRIPTION("VIN driver for the Sony IMX296 (Raspberry Pi Global Shutter Camera)");
 MODULE_LICENSE("GPL");
 
-/* 0 = libre (normal), 1 = disparo externo por XTR (fase 6). Igual que el driver de Raspberry Pi. */
-static int trigger_mode;
-module_param(trigger_mode, int, 0644);
+/*
+ * Parámetros del módulo con rango validado: un valor fuera de rango se rechaza con
+ * -EINVAL (en insmod o al escribir en /sys/module/imx296_mipi/parameters/) en lugar
+ * de interpretarse en silencio. step: los valores válidos son min, min + step, ...
+ */
+struct imx296_param {
+	int val;
+	int min;
+	int max;
+	int step;
+};
+
+static int imx296_param_set(const char *buf, const struct kernel_param *kp)
+{
+	struct imx296_param *p = kp->arg;
+	int v, ret;
+
+	ret = kstrtoint(buf, 0, &v);
+	if (ret)
+		return ret;
+	if (v < p->min || v > p->max || (v - p->min) % p->step)
+		return -EINVAL;
+
+	p->val = v;
+	return 0;
+}
+
+static int imx296_param_get(char *buf, const struct kernel_param *kp)
+{
+	const struct imx296_param *p = kp->arg;
+
+	return sysfs_emit(buf, "%d\n", p->val);
+}
+
+static const struct kernel_param_ops imx296_param_ops = {
+	.set = imx296_param_set,
+	.get = imx296_param_get,
+};
+
+/* 0 = libre (normal), 1 = disparo externo por XTR. Igual que el driver de Raspberry Pi. */
+static struct imx296_param trigger_mode = { .val = 0, .min = 0, .max = 1, .step = 1 };
+module_param_cb(trigger_mode, &imx296_param_ops, &trigger_mode, 0644);
 MODULE_PARM_DESC(trigger_mode, "Set trigger mode: 0=default, 1=XTRIG");
 
 /*
@@ -55,22 +99,23 @@ MODULE_PARM_DESC(trigger_mode, "Set trigger mode: 0=default, 1=XTRIG");
  * 0 = sin espejo. En la variante color (LQ) el espejo cambia el orden Bayer (RGGB -> BGGR);
  * las cámaras del proyecto son mono (LL), así que no afecta.
  */
-static int rotation = 180;
-module_param(rotation, int, 0644);
-MODULE_PARM_DESC(rotation, "Image rotation applied in the sensor: 180 (default, as Raspberry Pi) or 0");
+static struct imx296_param rotation = { .val = 180, .min = 0, .max = 180, .step = 180 };
+module_param_cb(rotation, &imx296_param_ops, &rotation, 0644);
+MODULE_PARM_DESC(rotation, "Rotation applied in the sensor: 180 (default, as Raspberry Pi) or 0");
 
 /*
  * Exposición y ganancia iniciales. Con isp_used = 1, VIN manda los controles de exposición
  * y ganancia al ISP (no al sensor), así que sin el servidor de ISP de Allwinner esta es la
  * forma de fijarlas. Se toman en cada S_INPUT/apertura y se aplican al arrancar la captura;
- * se pueden cambiar entre capturas en /sys/module/imx296_mipi/parameters/.
+ * se pueden cambiar entre capturas. Una exposición más larga que el cuadro se recorta al
+ * máximo del modo (VMAX - 1 líneas, ~16650 us a 60 fps).
  */
-static int exposure_us = 10000;
-module_param(exposure_us, int, 0644);
-MODULE_PARM_DESC(exposure_us, "Initial exposure in microseconds (default 10000; max ~16650 at 60 fps)");
+static struct imx296_param exposure_us = { .val = 10000, .min = 1, .max = 1000000, .step = 1 };
+module_param_cb(exposure_us, &imx296_param_ops, &exposure_us, 0644);
+MODULE_PARM_DESC(exposure_us, "Initial exposure in microseconds, 1..1000000 (default 10000; max ~16650 at 60 fps)");
 
-static int gain_db10;
-module_param(gain_db10, int, 0644);
+static struct imx296_param gain_db10 = { .val = 0, .min = 0, .max = 480, .step = 1 };
+module_param_cb(gain_db10, &imx296_param_ops, &gain_db10, 0644);
 MODULE_PARM_DESC(gain_db10, "Initial analogue gain in 0.1 dB steps, 0..480 (default 0)");
 
 #define V4L2_IDENT_SENSOR	0x0296
@@ -81,7 +126,10 @@ MODULE_PARM_DESC(gain_db10, "Initial analogue gain in 0.1 dB steps, 0..480 (defa
 #define SENSOR_NAME		"imx296_mipi"
 #define SENSOR_NAME_2		"imx296_mipi_2"
 
-/* Registros (nombres del driver del kernel principal). Multibyte: byte bajo en la dirección menor. */
+/*
+ * Registros (nombres del driver del kernel principal).
+ * Multibyte: byte bajo en la dirección menor.
+ */
 #define IMX296_CTRL00		0x3000	/* bit 0: STANDBY */
 #define IMX296_CTRL08		0x3008	/* bit 0: REGHOLD */
 #define IMX296_CTRL0A		0x300a	/* bit 0: XMSTA (1 = transmisión detenida) */
@@ -103,7 +151,7 @@ MODULE_PARM_DESC(gain_db10, "Initial analogue gain in 0.1 dB steps, 0..480 (defa
 #define IMX296_HTS		1760
 #define IMX296_PCLK		118800000
 #define IMX296_MIPI_BPS		1188000000
-/* 118,8 MHz / (1760 * 1125) = 60,00 cuadros/s (medido en la Fase 4: 16,66 ms por cuadro) */
+/* 118,8 MHz / (1760 * 1125) = 60,00 cuadros/s (medido: 16,667 ms por cuadro) */
 #define IMX296_VTS_60FPS	1125
 /* Tiempo de línea: 1100 / 74,25 MHz = 14 814,8 ns */
 #define IMX296_LINE_NS		14815
@@ -146,18 +194,19 @@ static const u16 imx296_gain_q4[IMX296_GAIN_REG_MAX + 1] = {
 	 667, 675, 683, 690, 698, 707, 715, 723, 731, 740, 748, 757,
 	 766, 775, 784, 793, 802, 811, 821, 830, 840, 849, 859, 869,
 	 879, 889, 900, 910, 921, 931, 942, 953, 964, 975, 987, 998,
-	1010,1021,1033,1045,1057,1069,1082,1094,1107,1120,1133,1146,
-	1159,1173,1186,1200,1214,1228,1242,1256,1271,1286,1301,1316,
-	1331,1346,1362,1378,1394,1410,1426,1443,1459,1476,1493,1510,
-	1528,1546,1564,1582,1600,1619,1637,1656,1675,1695,1714,1734,
-	1754,1775,1795,1816,1837,1858,1880,1902,1924,1946,1968,1991,
-	2014,2038,2061,2085,2109,2134,2158,2183,2209,2234,2260,2286,
-	2313,2339,2367,2394,2422,2450,2478,2507,2536,2565,2595,2625,
-	2655,2686,2717,2749,2780,2813,2845,2878,2912,2945,2979,3014,
-	3049,3084,3120,3156,3192,3229,3267,3305,3343,3382,3421,3460,
-	3500,3541,3582,3623,3665,3708,3751,3794,3838,3883,3928,3973,
+	1010, 1021, 1033, 1045, 1057, 1069, 1082, 1094, 1107, 1120, 1133, 1146,
+	1159, 1173, 1186, 1200, 1214, 1228, 1242, 1256, 1271, 1286, 1301, 1316,
+	1331, 1346, 1362, 1378, 1394, 1410, 1426, 1443, 1459, 1476, 1493, 1510,
+	1528, 1546, 1564, 1582, 1600, 1619, 1637, 1656, 1675, 1695, 1714, 1734,
+	1754, 1775, 1795, 1816, 1837, 1858, 1880, 1902, 1924, 1946, 1968, 1991,
+	2014, 2038, 2061, 2085, 2109, 2134, 2158, 2183, 2209, 2234, 2260, 2286,
+	2313, 2339, 2367, 2394, 2422, 2450, 2478, 2507, 2536, 2565, 2595, 2625,
+	2655, 2686, 2717, 2749, 2780, 2813, 2845, 2878, 2912, 2945, 2979, 3014,
+	3049, 3084, 3120, 3156, 3192, 3229, 3267, 3305, 3343, 3382, 3421, 3460,
+	3500, 3541, 3582, 3623, 3665, 3708, 3751, 3794, 3838, 3883, 3928, 3973,
 	4019,
 };
+
 #define IMX296_GAIN_Q4_MAX	4019
 
 static struct regval_list sensor_default_regs[] = {
@@ -169,7 +218,8 @@ static struct regval_list sensor_default_regs[] = {
  * consecutivas en una sola ráfaga I2C.
  */
 static struct regval_list sensor_1456x1088_60fps_regs[] = {
-	/* imx296_init_table: datos del fabricante sin documentar. La primera escritura activa CSI-2. */
+	/* imx296_init_table: datos del fabricante sin documentar. */
+	/* La primera escritura activa CSI-2. */
 	{0x3005, 0xf0},
 	{0x309e, 0x04},
 	{0x30a0, 0x04},
@@ -228,7 +278,8 @@ static struct regval_list sensor_1456x1088_60fps_regs[] = {
 	{0x308b, 0xb0},
 	{0x308c, 0x0c},
 	/* SHS1 (exposición) y GAIN se escriben en sensor_reg_init() con los valores vigentes */
-	{0x3212, 0x09},		/* GAINDLY = 1 cuadro (Raspberry Pi): ganancia y SHS1 en el mismo cuadro */
+	/* GAINDLY = 1 cuadro (Raspberry Pi): ganancia y SHS1 entran en el mismo cuadro */
+	{0x3212, 0x09},
 	{0x3254, 0x3c},		/* BLKLEVEL = 60 */
 	{0x3255, 0x00},
 	{0x4114, 0xc5},		/* GTTABLENUM */
@@ -264,8 +315,9 @@ static unsigned int imx296_vts(struct sensor_info *info)
 static void imx296_apply_params(struct sensor_info *info)
 {
 	unsigned int vts = imx296_vts(info);
-	u64 lines = ((u64)max(exposure_us, 1) * 1000 + IMX296_LINE_NS / 2) / IMX296_LINE_NS;
-	int g = clamp(gain_db10, 0, IMX296_GAIN_REG_MAX);
+	/* Rangos ya validados por imx296_param_set(); el clamp es defensivo. */
+	u64 lines = ((u64)max(exposure_us.val, 1) * 1000 + IMX296_LINE_NS / 2) / IMX296_LINE_NS;
+	int g = clamp(gain_db10.val, 0, IMX296_GAIN_REG_MAX);
 
 	lines = clamp_t(u64, lines, 1, vts - 1);
 	info->exp = (unsigned int)lines << 4;
@@ -294,7 +346,7 @@ static int sensor_s_exp(struct v4l2_subdev *sd, unsigned int exp_val)
 		return ret;
 
 	info->exp = lines << 4;
-	sensor_dbg("%s: %u lineas, SHS1 = %u\n", __func__, lines, vts - lines);
+	sensor_dbg("%s: %u lines, SHS1 = %u\n", __func__, lines, vts - lines);
 	return 0;
 }
 
@@ -326,7 +378,7 @@ static int sensor_s_gain(struct v4l2_subdev *sd, int gain_val)
 		return ret;
 
 	info->gain = gain_val;
-	sensor_dbg("%s: Q4 %d -> GAIN %d (0,1 dB)\n", __func__, gain_val, lo);
+	sensor_dbg("%s: Q4 %d -> GAIN %d (0.1 dB steps)\n", __func__, gain_val, lo);
 	return 0;
 }
 
@@ -337,15 +389,17 @@ static int sensor_s_gain(struct v4l2_subdev *sd, int gain_val)
 static int sensor_s_exp_gain(struct v4l2_subdev *sd,
 			     struct sensor_exp_gain *exp_gain)
 {
-	int ret;
+	int ret, ret_hold;
 
-	sensor_write(sd, IMX296_CTRL08, 0x01);
-	ret = sensor_s_exp(sd, exp_gain->exp_val);
+	ret = sensor_write(sd, IMX296_CTRL08, 0x01);
+	if (!ret)
+		ret = sensor_s_exp(sd, exp_gain->exp_val);
 	if (!ret)
 		ret = sensor_s_gain(sd, exp_gain->gain_val);
-	sensor_write(sd, IMX296_CTRL08, 0x00);
+	/* REGHOLD se suelta siempre, aunque algo haya fallado antes. */
+	ret_hold = sensor_write(sd, IMX296_CTRL08, 0x00);
 
-	return ret;
+	return ret ? ret : ret_hold;
 }
 
 /*
@@ -369,7 +423,7 @@ static int sensor_power(struct v4l2_subdev *sd, int on)
 		sensor_write(sd, IMX296_CTRL00, 0x01);
 		break;
 	case STBY_OFF:
-		/* La salida de standby se hace en sensor_s_stream(), después de cargar la tabla. */
+		/* Se sale de standby en sensor_s_stream(), después de cargar la tabla. */
 		sensor_dbg("STBY_OFF!\n");
 		break;
 	case REG_ON:
@@ -417,7 +471,7 @@ static int sensor_detect(struct v4l2_subdev *sd)
 
 	ret = sensor_write(sd, IMX296_CTRL00, 0x00);
 	if (ret) {
-		sensor_err("no responde al salir de standby (%d)\n", ret);
+		sensor_err("no answer when leaving standby (%d)\n", ret);
 		return -ENODEV;
 	}
 	usleep_range(2000, 5000);
@@ -427,18 +481,18 @@ static int sensor_detect(struct v4l2_subdev *sd)
 		ret = sensor_read(sd, IMX296_SENSOR_INFO + 1, &hi);
 	sensor_write(sd, IMX296_CTRL00, 0x01);
 	if (ret) {
-		sensor_err("no se pudo leer SENSOR_INFO (%d)\n", ret);
+		sensor_err("cannot read SENSOR_INFO (%d)\n", ret);
 		return -ENODEV;
 	}
 
 	info = ((hi & 0xff) << 8) | (lo & 0xff);
 	model = (info >> 6) & 0x1ff;
 	if (model != 296) {
-		sensor_err("modelo invalido: SENSOR_INFO = 0x%04x\n", info);
+		sensor_err("not an IMX296: SENSOR_INFO = 0x%04x\n", info);
 		return -ENODEV;
 	}
 
-	sensor_print("Sony IMX296%s detectada (SENSOR_INFO = 0x%04x)\n",
+	sensor_print("Sony IMX296%s detected (SENSOR_INFO = 0x%04x)\n",
 		     (info & IMX296_SENSOR_INFO_MONO) ? "LL (mono)" : "LQ (color)", info);
 	return 0;
 }
@@ -448,11 +502,10 @@ static int sensor_init(struct v4l2_subdev *sd, u32 val)
 	struct sensor_info *info = to_state(sd);
 	int ret;
 
+	/* sensor_detect() ya explica el fallo; VIN agrega "registering ..., No such device!". */
 	ret = sensor_detect(sd);
-	if (ret) {
-		sensor_err("chip found is not an target chip.\n");
+	if (ret)
 		return ret;
-	}
 
 	info->focus_status = 0;
 	info->low_speed = 0;
@@ -475,11 +528,11 @@ static long sensor_ioctl(struct v4l2_subdev *sd, unsigned int cmd, void *arg)
 
 	switch (cmd) {
 	case GET_CURRENT_WIN_CFG:
-		if (info->current_wins != NULL) {
+		if (info->current_wins) {
 			memcpy(arg, info->current_wins, sizeof(*info->current_wins));
 		} else {
-			sensor_err("empty wins!\n");
-			ret = -1;
+			sensor_err("no current window\n");
+			ret = -EINVAL;
 		}
 		break;
 	case SET_FPS:
@@ -497,9 +550,10 @@ static long sensor_ioctl(struct v4l2_subdev *sd, unsigned int cmd, void *arg)
 }
 
 /*
- * Bayer RGGB sin espejo, según la tabla de formatos del driver de Raspberry Pi
- * (el kernel principal dice BGGR): hay que confirmarlo con una imagen real.
- * VIN no reconoce MEDIA_BUS_FMT_Y10_1X10, así que la variante mono usaría el mismo código.
+ * Las cámaras del proyecto son mono (IMX296LL) y VIN no reconoce MEDIA_BUS_FMT_Y10_1X10:
+ * se declara SRGGB10, que tiene el mismo empaquetado RAW10, y los datos se leen como gris.
+ * Para la variante color (LQ), RGGB sin espejo sale de la tabla de Raspberry Pi (el kernel
+ * principal dice BGGR) y no está verificado con una imagen real.
  */
 static struct sensor_format_struct sensor_formats[] = {
 	{
@@ -510,6 +564,7 @@ static struct sensor_format_struct sensor_formats[] = {
 		.bpp = 1
 	},
 };
+
 #define N_FMTS ARRAY_SIZE(sensor_formats)
 
 static struct sensor_win_size sensor_win_sizes[] = {
@@ -533,6 +588,7 @@ static struct sensor_win_size sensor_win_sizes[] = {
 		.set_size = NULL,
 	},
 };
+
 #define N_WIN_SIZES (ARRAY_SIZE(sensor_win_sizes))
 
 static int sensor_reg_init(struct sensor_info *info)
@@ -543,14 +599,14 @@ static int sensor_reg_init(struct sensor_info *info)
 	int ret;
 
 	if (!wsize || !sensor_fmt) {
-		sensor_err("formato sin inicializar\n");
+		sensor_err("format not initialized\n");
 		return -EINVAL;
 	}
 
 	ret = sensor_write_array(sd, sensor_default_regs,
 				 ARRAY_SIZE(sensor_default_regs));
 	if (ret < 0) {
-		sensor_err("write sensor_default_regs error\n");
+		sensor_err("cannot write default registers (%d)\n", ret);
 		return ret;
 	}
 
@@ -559,7 +615,7 @@ static int sensor_reg_init(struct sensor_info *info)
 	if (wsize->regs) {
 		ret = sensor_write_array(sd, wsize->regs, wsize->regs_size);
 		if (ret < 0) {
-			sensor_err("write mode regs error\n");
+			sensor_err("cannot write mode registers (%d)\n", ret);
 			return ret;
 		}
 	}
@@ -572,21 +628,21 @@ static int sensor_reg_init(struct sensor_info *info)
 	 * lo que se haya fijado antes de arrancar (parámetros, controles del subdev o 3A).
 	 * El sensor sigue en standby, así que los cambios entran desde el primer cuadro.
 	 */
-	ret = sensor_write(sd, IMX296_CTRL0E, rotation == 180 ? 0x03 : 0x00);
+	ret = sensor_write(sd, IMX296_CTRL0E, rotation.val == 180 ? 0x03 : 0x00);
 	if (!ret)
 		ret = sensor_s_exp(sd, info->exp);
 	if (!ret)
 		ret = sensor_s_gain(sd, info->gain);
 	if (ret) {
-		sensor_err("no se pudo fijar orientación/exposición/ganancia (%d)\n", ret);
+		sensor_err("cannot set rotation/exposure/gain (%d)\n", ret);
 		return ret;
 	}
 
 	info->width = wsize->width;
 	info->height = wsize->height;
 
-	sensor_print("s_fmt %dx%d, rotacion %d, exposicion %u lineas (%u us), ganancia Q4 %u\n",
-		     wsize->width, wsize->height, rotation == 180 ? 180 : 0, info->exp >> 4,
+	sensor_print("stream %ux%u, rotation %d, exposure %u lines (%u us), gain Q4 %u\n",
+		     wsize->width, wsize->height, rotation.val, info->exp >> 4,
 		     (info->exp >> 4) * IMX296_LINE_NS / 1000, info->gain);
 	return 0;
 }
@@ -602,8 +658,8 @@ static int sensor_start(struct v4l2_subdev *sd)
 
 	ret = sensor_write(sd, IMX296_CTRL00, 0x00);
 	usleep_range(2000, 5000);
-	ret |= sensor_write(sd, IMX296_CTRL0B, trigger_mode == 1 ? 0x01 : 0x00);
-	ret |= sensor_write(sd, IMX296_LOWLAGTRG, trigger_mode == 1 ? 0x01 : 0x00);
+	ret |= sensor_write(sd, IMX296_CTRL0B, trigger_mode.val == 1 ? 0x01 : 0x00);
+	ret |= sensor_write(sd, IMX296_LOWLAGTRG, trigger_mode.val == 1 ? 0x01 : 0x00);
 	ret |= sensor_write(sd, IMX296_CTRL0A, 0x00);
 
 	return ret ? -EIO : 0;
@@ -621,7 +677,7 @@ static int sensor_stop(struct v4l2_subdev *sd)
 	ret = sensor_write(sd, IMX296_CTRL0A, 0x01);
 	ret |= sensor_write(sd, IMX296_CTRL00, 0x01);
 	if (ret)
-		sensor_err("no se pudo detener la transmisión (%d)\n", ret);
+		sensor_err("cannot stop streaming (%d)\n", ret);
 
 	return 0;
 }
@@ -632,13 +688,13 @@ static int sensor_s_stream(struct v4l2_subdev *sd, int enable)
 	int ret;
 
 	if (!info->current_wins || !info->fmt) {
-		sensor_err("%s: formato sin inicializar\n", __func__);
+		sensor_err("%s: format not initialized\n", __func__);
 		return enable ? -EINVAL : 0;
 	}
 
-	sensor_print("%s on = %d, %d*%d %x, trigger_mode = %d\n", __func__, enable,
-		     info->current_wins->width, info->current_wins->height,
-		     info->fmt->mbus_code, trigger_mode);
+	sensor_dbg("%s on = %d, %ux%u 0x%x, trigger_mode = %d\n", __func__, enable,
+		   info->current_wins->width, info->current_wins->height,
+		   info->fmt->mbus_code, trigger_mode.val);
 
 	if (!enable)
 		return sensor_stop(sd);
@@ -655,11 +711,7 @@ static int sensor_g_mbus_config(struct v4l2_subdev *sd, unsigned int pad,
 				struct v4l2_mbus_config *cfg)
 {
 	cfg->type = V4L2_MBUS_CSI2_DPHY;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
-	cfg->bus.mipi_csi2.num_data_lanes = 0 | V4L2_MBUS_CSI2_1_LANE | V4L2_MBUS_CSI2_CHANNEL_0;
-#else
-	cfg->flags = 0 | V4L2_MBUS_CSI2_1_LANE | V4L2_MBUS_CSI2_CHANNEL_0;
-#endif
+	cfg->bus.mipi_csi2.num_data_lanes = V4L2_MBUS_CSI2_1_LANE | V4L2_MBUS_CSI2_CHANNEL_0;
 	return 0;
 }
 
@@ -753,11 +805,11 @@ static int sensor_init_controls(struct v4l2_subdev *sd, const struct v4l2_ctrl_o
 
 	ctrl = v4l2_ctrl_new_std(handler, ops, V4L2_CID_EXPOSURE, 1 << 4,
 				 (IMX296_VTS_60FPS - 1) << 4, 1, IMX296_EXP_INIT << 4);
-	if (ctrl != NULL)
+	if (ctrl)
 		ctrl->flags |= V4L2_CTRL_FLAG_VOLATILE;
 	ctrl = v4l2_ctrl_new_std(handler, ops, V4L2_CID_GAIN, 16,
 				 IMX296_GAIN_Q4_MAX, 1, 16);
-	if (ctrl != NULL)
+	if (ctrl)
 		ctrl->flags |= V4L2_CTRL_FLAG_VOLATILE;
 
 	if (handler->error) {
@@ -772,28 +824,37 @@ static int sensor_init_controls(struct v4l2_subdev *sd, const struct v4l2_ctrl_o
 /* Solo se usa en el modo CCI de VIN (CONFIG_CSI_CCI), desactivado en la A733. */
 static int sensor_dev_id;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
+/* Índice en cci_drv[] de la instancia con ese nombre de cliente I2C, o -1. */
+static int imx296_instance(struct i2c_client *client)
+{
+	int i;
+
+	for (i = 0; i < SENSOR_NUM; i++) {
+		if (!strcmp(cci_drv[i].name, client->name))
+			return i;
+	}
+	return -1;
+}
+
+/* Solo kernel 6.6 (rama orange-pi-6.6-sun60iw2): probe sin i2c_device_id, remove void. */
 static int sensor_probe(struct i2c_client *client)
-#else
-static int sensor_probe(struct i2c_client *client,
-			const struct i2c_device_id *id)
-#endif
 {
 	struct v4l2_subdev *sd;
 	struct sensor_info *info;
 	int i;
 
 	info = kzalloc(sizeof(*info), GFP_KERNEL);
-	if (info == NULL)
+	if (!info)
 		return -ENOMEM;
 	sd = &info->sd;
 	/* Antes que nada: sensor_registered() (cci_helper.c) toma info->lock. */
 	mutex_init(&info->lock);
 
 	if (client) {
-		for (i = 0; i < SENSOR_NUM; i++) {
-			if (!strcmp(cci_drv[i].name, client->name))
-				break;
+		i = imx296_instance(client);
+		if (i < 0) {
+			kfree(info);
+			return -ENODEV;
 		}
 		cci_dev_probe_helper(sd, client, &sensor_ops, &cci_drv[i]);
 	} else {
@@ -823,20 +884,15 @@ static int sensor_probe(struct i2c_client *client,
 	return 0;
 }
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
-static int sensor_remove(struct i2c_client *client)
-#else
 static void sensor_remove(struct i2c_client *client)
-#endif
 {
 	struct v4l2_subdev *sd;
 	int i;
 
 	if (client) {
-		for (i = 0; i < SENSOR_NUM; i++) {
-			if (!strcmp(cci_drv[i].name, client->name))
-				break;
-		}
+		i = imx296_instance(client);
+		if (i < 0)
+			return;
 		sd = cci_dev_remove_helper(client, &cci_drv[i]);
 	} else {
 		sd = cci_dev_remove_helper(client, &cci_drv[sensor_dev_id++]);
@@ -844,9 +900,6 @@ static void sensor_remove(struct i2c_client *client)
 	/* cci_dev_remove_helper() ya desregistró el subdev; los controles se pueden liberar. */
 	v4l2_ctrl_handler_free(sd->ctrl_handler);
 	kfree(to_state(sd));
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
-	return 0;
-#endif
 }
 
 static const struct i2c_device_id sensor_id[] = {

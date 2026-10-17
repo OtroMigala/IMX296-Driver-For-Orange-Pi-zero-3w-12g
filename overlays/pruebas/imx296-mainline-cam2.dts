@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Fase 3, prueba 1: declarar la IMX296 en el bus I2C de CAM2 para el driver
- * del kernel principal (drivers/media/i2c/imx296.c, compatible "sony,imx296").
+ * Prueba: declarar la IMX296 en el bus I2C de CAM2 para el driver del kernel
+ * principal (drivers/media/i2c/imx296.c, compatible "sony,imx296").
+ * Resultado: el driver identifica el sensor ("found IMX296LL"), pero VIN no usa
+ * subdispositivos V4L2 estándar y no aparece ningún /dev/video*. Por eso existe
+ * el driver VIN de este repositorio. No usar junto con imx296-vin.
  *
  * - Reloj: la cámara GS trae su propio oscilador de 54 MHz; el driver exige un
  *   reloj "inck" para elegir la tabla INCKSEL, así que se declara un fixed-clock
  *   de 54 MHz (no genera ninguna señal, solo informa la frecuencia).
  * - reset-gpios: PE10 = CAM_IO0 del conector CAM2 (esquemático, hoja 13).
  *   El driver pone reset = 0 (desactivado) al encender; con GPIO_ACTIVE_LOW
- *   eso deja PE10 en alto, igual que en la prueba de la Fase 2.
+ *   eso deja PE10 en alto, igual que scripts/placa/prueba_i2c.sh.
  * - Sin reguladores: el driver usa reguladores ficticios (la cámara toma 3,3 V
  *   directo de DCDC1).
  * - Sin port/endpoint: VIN no usa el enlace de medios estándar; esta prueba

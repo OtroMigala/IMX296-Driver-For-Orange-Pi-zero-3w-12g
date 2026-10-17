@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Fase 1 (en la Orange Pi): inventario de la placa. Genera info_placa.txt
-# Uso: sudo ./02_info_placa.sh
+# En la placa: inventario de kernel, módulos, buses I2C, GPIO y nodos de cámara del
+# device tree en vivo. Genera info_placa.txt en la carpeta actual.
+# Uso: sudo ./info_placa.sh
 OUT="info_placa.txt"
 {
   echo "### Fecha"; date

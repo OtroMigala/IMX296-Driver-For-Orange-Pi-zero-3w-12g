@@ -26,12 +26,15 @@ La imagen de Orange Pi solo soporta la cámara IMX219. El driver de la IMX296 de
 ## Estructura
 
 ```
-driver/imx296_mipi.c          driver VIN, dos instancias: imx296_mipi (CAM1) e imx296_mipi_2 (CAM2)
-overlays/imx296-vin.dts       overlay de usuario: CAM1 y CAM2 con este driver (recomendado)
-overlays/imx296-vin-cam2.dts  variante solo para CAM2
-overlays/pruebas/             overlay para probar el driver del kernel principal (identifica el sensor, sin imagen)
-build/                        compilación cruzada en Docker: Dockerfile, compilar.ps1 (Windows), compilar.sh
-scripts/                      descarga de fuentes, inventario de la placa, prueba de I2C, captura y conversión
+driver/imx296_mipi.c            driver VIN, dos instancias: imx296_mipi (CAM1) e imx296_mipi_2 (CAM2)
+driver/integracion_vin.patch    Kconfig/Makefile para compilarlo dentro del kernel de Orange Pi
+overlays/imx296-vin.dts         overlay de usuario: CAM1 y CAM2 con este driver (recomendado)
+overlays/imx296-vin-cam2.dts    variante solo para CAM2
+overlays/pruebas/               overlay para probar el driver del kernel principal (identifica el sensor, sin imagen)
+build/                          compilación cruzada en Docker: compilar.ps1 (Windows), compilar_linux.sh (Linux)
+scripts/descargar_fuentes.sh    descarga las fuentes necesarias para compilar (en el PC)
+scripts/placa/                  en la placa: captura.sh, prueba_i2c.sh, info_placa.sh, raw16_a_gris8.py
+scripts/pc/                     en el PC: raw_a_png.py, gris8_a_mp4.sh
 ```
 
 ## Compilación (en el PC, con Docker)
@@ -40,7 +43,7 @@ El módulo se compila en un contenedor x86-64 con el mismo paquete de headers qu
 
 1. Descargar las fuentes (en Windows, desde Git Bash). Crea `fuentes/`, que no se versiona:
    ```bash
-   bash scripts/01_fetch_sources.sh
+   bash scripts/descargar_fuentes.sh
    ```
    Entre otras cosas, exporta `bsp/drivers/vin` y `bsp/include` del commit `8a9be72` de la rama `orange-pi-6.6-sun60iw2` a `fuentes/vin-8a9be72/`. La imagen no registra con qué commit se compiló su kernel; `8a9be72` es el último anterior a esa compilación, y los `.h` de VIN cambiaron después.
 2. Copiar a `build/` el paquete de headers que trae la imagen:
@@ -53,15 +56,21 @@ El módulo se compila en un contenedor x86-64 con el mismo paquete de headers qu
    ```
    En Linux:
    ```bash
-   docker build -t opi-a733-kmod:6.6.98 build
-   docker run --rm -v "$PWD/fuentes/vin-8a9be72:/fuentes:ro" -v "$PWD/driver:/driver:ro" \
-     -v "$PWD/build/salida:/salida" opi-a733-kmod:6.6.98 compilar.sh imx296_mipi
+   build/compilar_linux.sh imx296_mipi
    ```
-   El módulo queda en `build/salida/imx296_mipi.ko`. Para validar el entorno se puede compilar `imx219` y compararlo con el `imx219.ko` de la imagen.
+   El módulo queda en `build/salida/imx296_mipi.ko`. La primera vez se construye la imagen Docker `opi-a733-kmod:6.6.98` (`-Rebuild` o `--rebuild` para rehacerla). Para validar el entorno se puede compilar `imx219` y compararlo con el `imx219.ko` de la imagen.
+
+Revisión de estilo con el `checkpatch.pl` del kernel: `build/compilar_linux.sh --checkpatch`, o en Windows:
+
+```powershell
+docker run --rm -v "${PWD}\driver:/driver:ro" opi-a733-kmod:6.6.98 sh -c 'perl $KDIR/scripts/checkpatch.pl --no-tree -f /driver/imx296_mipi.c'
+```
+
+Para compilarlo dentro del kernel completo de Orange Pi, en vez de fuera del árbol, ver las instrucciones al principio de `driver/integracion_vin.patch`.
 
 ## Instalación en la placa
 
-1. Copiar a la placa `build/salida/imx296_mipi.ko` y `overlays/imx296-vin.dts` (los scripts esperan `/home/orangepi/port/`).
+1. Copiar a una misma carpeta de la placa (por ejemplo `~/port/`) `build/salida/imx296_mipi.ko`, `overlays/imx296-vin.dts` y el contenido de `scripts/placa/`. `captura.sh` busca el módulo en su propia carpeta; otra ubicación se indica con `PORT_DIR`.
 2. Compilar el overlay e instalarlo como overlay de usuario, con respaldo previo de `orangepiEnv.txt`:
    ```bash
    dtc -@ -I dts -O dtb -o imx296-vin.dtbo imx296-vin.dts
@@ -98,23 +107,23 @@ VIN entrega cada píxel en 16 bits little-endian, alineado a la derecha (valores
 
 ### Parámetros del módulo
 
-Se pueden cambiar entre capturas en `/sys/module/imx296_mipi/parameters/`; se aplican al arrancar la captura.
+Se pueden cambiar entre capturas en `/sys/module/imx296_mipi/parameters/`; se aplican al arrancar la captura. Un valor fuera de rango se rechaza con un error, tanto en `insmod` como al escribirlo en `/sys`.
 
 | Parámetro | Por defecto | Qué hace |
 |---|---|---|
 | `rotation` | 180 | 180 = espejo horizontal y vertical en el sensor, que va montado invertido en la cámara GS (igual que `rotation = <180>` en el overlay de Raspberry Pi). 0 = sin espejo |
-| `exposure_us` | 10000 | Exposición en µs. Máximo ~16 650 a 60 fps; se ajusta en pasos de una línea (14,8 µs) |
+| `exposure_us` | 10000 | Exposición en µs, de 1 a 1 000 000. Se recorta al máximo del modo (~16 650 a 60 fps) y se ajusta en pasos de una línea (14,8 µs) |
 | `gain_db10` | 0 | Ganancia analógica en pasos de 0,1 dB, de 0 a 480 |
-| `trigger_mode` | 0 | 1 = disparo externo por XTR, como en el driver de Raspberry Pi (sin probar) |
+| `trigger_mode` | 0 | 0 o 1. 1 = disparo externo por XTR, como en el driver de Raspberry Pi (sin probar) |
 
 La exposición y la ganancia se fijan por parámetros porque, con `isp_used = 1` (el valor del device tree de la placa), VIN manda los controles V4L2 de exposición y ganancia al ISP y no al sensor.
 
 ### Scripts
 
-- `scripts/04_fase4_pasos.sh` (en la placa): carga y captura paso a paso, revisando la microSD antes y después. Por ejemplo, `sudo CAM=2 bash 04_fase4_pasos.sh carga` y luego `captura` o `video <nombre> [cuadros]`. El video se graba en `/dev/shm`, porque a 60 fps son unos 190 MB/s, más de lo que aguanta la microSD.
-- `scripts/raw_a_png.py` (en el PC, sin dependencias): RAW → PNG, `py -3 raw_a_png.py cam2.raw 1456 1088 cam2`.
-- `scripts/raw16_a_gris8.py` (en la placa, numpy) y `scripts/gris8_a_mp4.sh` (en el PC, ffmpeg): video MP4 y fotos.
-- `scripts/02_info_placa.sh` y `scripts/03_hito1_i2c.sh` (en la placa): inventario y prueba de I2C sin VIN. Para CAM2, `sudo ./03_hito1_i2c.sh 9 PE10`; para CAM1, `sudo ./03_hito1_i2c.sh 11 PE6`.
+- `scripts/placa/captura.sh`: carga y captura paso a paso, revisando la microSD antes y después. Por ejemplo, `sudo CAM=2 bash captura.sh carga` y luego `captura` o `video <nombre> [cuadros]`. El video se graba en `/dev/shm`, porque a 60 fps son unos 190 MB/s, más de lo que aguanta la microSD.
+- `scripts/placa/raw16_a_gris8.py` (numpy) y `scripts/pc/gris8_a_mp4.sh` (ffmpeg): video MP4 y fotos.
+- `scripts/pc/raw_a_png.py` (sin dependencias): RAW → PNG, `py -3 raw_a_png.py cam2.raw 1456 1088 cam2`.
+- `scripts/placa/info_placa.sh` y `scripts/placa/prueba_i2c.sh`: inventario y prueba de I2C sin VIN. Para CAM2, `sudo ./prueba_i2c.sh 9 PE10`; para CAM1, `sudo ./prueba_i2c.sh 11 PE6`.
 
 ## Problemas conocidos de VIN
 
