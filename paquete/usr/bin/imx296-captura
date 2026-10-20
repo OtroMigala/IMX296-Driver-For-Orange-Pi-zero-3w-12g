@@ -1,0 +1,6 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# Captura paso a paso con la cámara IMX296 (scripts/placa/captura.sh del repositorio).
+# Uso: sudo [CAM=1|2] [ANCHO=.. ALTO=..] imx296-captura <paso> [argumentos]   (pasos: sin argumentos)
+# Las capturas quedan en la carpeta actual (o en SALIDA=carpeta).
+exec bash /usr/share/imx296-vin/scripts/captura.sh "$@"

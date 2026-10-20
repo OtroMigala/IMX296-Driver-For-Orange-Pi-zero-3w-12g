@@ -1,0 +1,13 @@
+#!/bin/sh
+set -e
+if [ "$1" = remove ] || [ "$1" = deconfigure ]; then
+	if [ -d /run/systemd/system ]; then
+		systemctl disable imx296-camaras.service || true
+	fi
+	# Descargar VIN no está probado: los módulos quedan cargados hasta reiniciar.
+	if grep -q '^imx296_mipi ' /proc/modules; then
+		echo "imx296-vin: los módulos siguen cargados hasta reiniciar."
+	fi
+	echo "imx296-vin: el overlay de /boot no se toca; para quitarlo, antes de desinstalar: sudo imx296-overlay quitar"
+fi
+exit 0

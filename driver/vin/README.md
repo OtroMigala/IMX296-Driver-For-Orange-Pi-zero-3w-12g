@@ -48,7 +48,7 @@ Con solo 4 búferes, escribir cada cuadro de 3 MB a veces se atrasa y se pierde 
 
 `build/compilar_vin.sh` compila `vin_io.ko` y `vin_v4l2.ko` desde `fuentes/vin-8a9be72` y aplica estos parches en orden. Con `--original` compila VIN sin modificar. Con `--comparar <carpeta>` lo contrasta con los módulos de la imagen: sin parches, todo sale idéntico (`srcversion`, bytes de código y relocalizaciones).
 
-En la placa, sin pisar el original:
+El paquete `imx296-vin` (ver el README principal) lo instala así. A mano, en la placa, sin pisar el original:
 
 ```bash
 sudo install -D -m 644 vin_v4l2.ko /lib/modules/$(uname -r)/updates/vin_v4l2.ko
@@ -56,7 +56,7 @@ sudo depmod -a        # updates/ tiene prioridad (/etc/depmod.d/ubuntu.conf)
 modinfo -n vin_v4l2   # .../updates/vin_v4l2.ko
 ```
 
-`vin_io.ko` no cambia, se usa el de la imagen. Para volver al original: `sudo rm /lib/modules/$(uname -r)/updates/vin_v4l2.ko && sudo depmod -a`. VIN no se carga al arrancar, así que un módulo con problemas no impide arrancar.
+`vin_io.ko` no cambia, se usa el de la imagen. Para volver al original: `sudo rm /lib/modules/$(uname -r)/updates/vin_v4l2.ko && sudo depmod -a`. Sin el paquete, VIN no se carga al arrancar, así que un módulo con problemas no impide arrancar. Con el paquete sí se carga, pero el servicio no lo reintenta si la carga del arranque anterior se cortó.
 
 ## Otros bugs vistos, sin corregir
 

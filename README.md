@@ -17,6 +17,7 @@ La imagen de Orange Pi solo soporta la cámara IMX219. El driver de la IMX296 de
 | Exposición automática | Pendiente |
 | Parche de VIN (`driver/vin/`) | Los dos usos de VIN que daban *kernel panic* devuelven un error (`ENODEV` / `EINVAL`); la captura normal no cambia |
 | Robustez de la placa (`config/`) | Tras un *kernel panic* vuelve sola por SSH en ~46 s; si queda colgada, el watchdog la reinicia a los 16 s. El journal sobrevive a los cortes |
+| Paquete `.deb` (`paquete/`) | Instala los módulos sin pisar los originales, carga las cámaras al arrancar y se desinstala sin dejar rastro (medido). El overlay se instala aparte, con confirmación |
 
 ## Hardware probado
 
@@ -35,10 +36,12 @@ overlays/imx296-vin.dts         overlay de usuario: CAM1 y CAM2 con este driver 
 overlays/imx296-vin-cam2.dts    variante solo para CAM2
 overlays/pruebas/               overlay para probar el driver del kernel principal (identifica el sensor, sin imagen)
 build/                          compilación cruzada en Docker: compilar.ps1 (Windows), compilar_linux.sh (Linux),
-                                compilar_vin.sh (VIN con los parches de driver/vin/)
+                                compilar_vin.sh (VIN con los parches de driver/vin/), construir_deb.sh (paquete)
+paquete/                        árbol del paquete imx296-vin: servicio de carga, softdep, imx296-overlay
 scripts/descargar_fuentes.sh    descarga las fuentes necesarias para compilar (en el PC)
 scripts/placa/                  en la placa: captura.sh, prueba_modos.sh, analizar_raw.py, raw16_a_gris8.py,
-                                prueba_i2c.sh, info_placa.sh, estado_robustez.sh, prueba_termica.sh
+                                prueba_i2c.sh, info_placa.sh, estado_robustez.sh, prueba_termica.sh,
+                                estado_paquete.sh
 scripts/pc/                     en el PC: raw_a_png.py, gris8_a_mp4.sh; en Windows, serie_grabar.ps1 y
                                 esperar_ssh.ps1 (grabar la consola serie y medir reinicios)
 config/                         configuración de la placa para que se recupere sola de un fallo (ver
@@ -85,9 +88,47 @@ build/compilar_vin.sh --original --comparar <carpeta con vin_io.ko y vin_v4l2.ko
 
 La segunda forma valida el entorno: sin parches, el VIN compilado sale idéntico al de la imagen (`srcversion`, bytes de código y relocalizaciones). El script pasa las fuentes a LF; un checkout en Windows las deja con CRLF y entonces no coincide `srcversion` ni se aplican los parches.
 
+El paquete se arma con los dos módulos ya compilados (Linux, o Windows desde Git Bash):
+
+```bash
+build/construir_deb.sh [versión]            # build/salida/imx296-vin_<versión>_arm64.deb
+```
+
+Al árbol de `paquete/` le agrega los módulos, los overlays compilados con el `dtc` del paquete de headers (1.6.1, el mismo de la placa: los `.dtbo` salen idénticos) y los scripts de `scripts/placa/`.
+
 ## Instalación en la placa
 
-1. Copiar a una misma carpeta de la placa (por ejemplo `~/port/`) `build/salida/imx296_mipi.ko`, `overlays/imx296-vin.dts` y el contenido de `scripts/placa/`. `captura.sh` busca el módulo en su propia carpeta; otra ubicación se indica con `PORT_DIR`.
+### Con el paquete (recomendado)
+
+Solo sirve para el kernel `6.6.98-sun60iw2` de la imagen 1.0.2: si no está, el paquete no se instala. El release trae el `.deb`; también se arma con `build/construir_deb.sh`.
+
+```bash
+sudo dpkg -i imx296-vin_3.1_arm64.deb
+sudo imx296-overlay instalar      # muestra el cambio en /boot/orangepiEnv.txt y pide confirmación
+sudo reboot
+```
+
+Al arrancar, el servicio `imx296-camaras` carga VIN y el driver, y `journalctl -u imx296-camaras` dice qué conectores tienen cámara (`CAM2: lista en /dev/video8`). Para capturar no hace falta `sudo`: basta con estar en el grupo `video`, y el usuario `orangepi` lo está.
+
+| Qué instala | Para qué |
+|---|---|
+| `imx296_mipi.ko` y `vin_v4l2.ko` con los parches, en `/lib/modules/6.6.98-sun60iw2/updates/` | `updates/` tiene prioridad sobre `kernel/`: los módulos originales no se tocan |
+| `/lib/modprobe.d/imx296-vin.conf` | `softdep`: `modprobe vin_v4l2` carga `vin_io` → `imx296_mipi` → `vin_v4l2`, en ese orden |
+| `/etc/modprobe.d/imx296.conf` | Parámetros del módulo (ver "Parámetros del módulo"). dpkg conserva los cambios al actualizar |
+| Servicio `imx296-camaras` | Carga las cámaras al arrancar (~2,4 s, en paralelo con el resto del arranque). No las descarga al apagar: descargar VIN no está probado |
+| `imx296-overlay estado`, `instalar [imx296-vin\|imx296-vin-cam2]`, `quitar` | Instala o quita el overlay. Nunca corre solo: muestra el diff, pide confirmación (`-s` para no preguntar) y deja un respaldo `orangepiEnv.txt.antes-imx296-<fecha>` |
+| `imx296-captura <paso>` y `/usr/share/imx296-vin/` | `captura.sh` y los demás scripts de `scripts/placa/`, y los overlays (`.dts` y `.dtbo`) |
+
+**Si cargar VIN colgara la placa**, el servicio no lo reintenta en el arranque siguiente, para no entrar en un bucle de reinicios. Un *panic* reinicia la placa con `panic=10`, y un cuelgue, el watchdog. Antes de cargar, el servicio deja la marca `/var/lib/imx296-vin/cargando` y la borra al terminar. Si al arrancar la encuentra, no carga nada, queda en `failed` y lo explica en `systemctl status imx296-camaras`.
+
+- Para reintentar: `sudo rm /var/lib/imx296-vin/cargando && sudo systemctl restart imx296-camaras`.
+- Para saltar la carga en un arranque, hay que poner `imx296.noload` en la línea de comandos del kernel. Desde la consola serie: una tecla durante `Hit any key to stop autoboot` (1 s) y, en U-Boot, `setenv extraboardargs imx296.noload` y `boot`. `extraargs` no sirve, porque `boot.scr` lo vuelve a leer de `orangepiEnv.txt`. La condición del servicio se probó con una unidad de prueba; el paso por U-Boot, no.
+
+Para desinstalar: `sudo imx296-overlay quitar` (si también se quiere sacar el overlay), `sudo dpkg -P imx296-vin` y reiniciar. Medido: después de purgar y reiniciar, los índices de módulos vuelven a ser los de fábrica y no queda ningún archivo del paquete (`scripts/placa/estado_paquete.sh` antes de instalar y después de purgar, y `diff`). Con `dpkg -r` en vez de `-P` quedan `/etc/modprobe.d/imx296.conf` y `/var/lib/imx296-vin/`.
+
+### A mano
+
+1. Copiar a una misma carpeta de la placa (por ejemplo `~/port/`) `build/salida/imx296_mipi.ko`, `overlays/imx296-vin.dts` y el contenido de `scripts/placa/`. `captura.sh` busca el módulo en su propia carpeta; otra ubicación se indica con `PORT_DIR`. Para el VIN con parches, ver `driver/vin/README.md`.
 2. Compilar el overlay e instalarlo como overlay de usuario, con respaldo previo de `orangepiEnv.txt`:
    ```bash
    dtc -@ -I dts -O dtb -o imx296-vin.dtbo imx296-vin.dts
@@ -102,7 +143,7 @@ El overlay solo cambia el nombre del driver (`sensor0_mname`, `sensor2_mname`) y
 
 ## Uso
 
-Los módulos se cargan en este orden, porque `vin_v4l2` busca el driver del sensor al cargarse:
+Con el paquete, el servicio ya los cargó al arrancar. A mano, los módulos se cargan en este orden, porque `vin_v4l2` busca el driver del sensor al cargarse:
 
 ```bash
 sudo modprobe vin_io
@@ -140,7 +181,7 @@ En 728×544, VIN agrega 8704 bytes de relleno al final de cada cuadro (`Size Ima
 
 ### Controles del sensor
 
-Se manejan en el subdispositivo del sensor (`/dev/v4l-subdev0` con CAM1 vacío; `sudo bash captura.sh controles` lo encuentra), en vivo o antes de capturar. Fuera de transmisión solo se guardan y se aplican al arrancar. Los controles de exposición y ganancia del nodo de video, en cambio, van al ISP de VIN (`isp_used = 1` en el device tree) y no al sensor.
+Se manejan en el subdispositivo del sensor (`/dev/v4l-subdev0` con CAM1 vacío; `imx296-captura controles` o `bash captura.sh controles` lo encuentra), en vivo o antes de capturar. Fuera de transmisión solo se guardan y se aplican al arrancar. Los controles de exposición y ganancia del nodo de video, en cambio, van al ISP de VIN (`isp_used = 1` en el device tree) y no al sensor.
 
 | Control | Unidad y rango | Notas |
 |---|---|---|
@@ -165,7 +206,7 @@ Los cambios en vivo entran unos 2 cuadros después de pedirlos. Al bajar la gana
 
 ### Parámetros del módulo
 
-Son los valores iniciales de los controles y solo se leen al cargar el módulo (desde v3, después se usan los controles). Un valor fuera de rango se rechaza en `insmod`.
+Son los valores iniciales de los controles y solo se leen al cargar el módulo (desde v3, después se usan los controles). Un valor fuera de rango hace fallar la carga del módulo. Con el paquete se fijan en `/etc/modprobe.d/imx296.conf` y valen desde el próximo arranque: por ejemplo, `options imx296_mipi exposure_us=5000` da `exposure` = 337 líneas (medido). A mano, se pasan como argumentos de `insmod`.
 
 | Parámetro | Por defecto | Qué hace |
 |---|---|---|
@@ -176,7 +217,8 @@ Son los valores iniciales de los controles y solo se leen al cargar el módulo (
 
 ### Scripts
 
-- `scripts/placa/captura.sh`: carga y captura paso a paso, revisando la microSD antes y después. Por ejemplo, `sudo CAM=2 bash captura.sh carga` y luego `controles`, `captura` o `video <nombre> [cuadros]`; el modo se elige con `ANCHO` y `ALTO` (`sudo ANCHO=728 ALTO=544 bash captura.sh captura`). El video se graba en `/dev/shm`, porque a 60 fps son unos 190 MB/s, más de lo que aguanta la microSD.
+- `scripts/placa/captura.sh`: carga y captura paso a paso, revisando la microSD antes y después. Por ejemplo, `sudo CAM=2 bash captura.sh carga` y luego `controles`, `captura` o `video <nombre> [cuadros]`; el modo se elige con `ANCHO` y `ALTO` (`sudo ANCHO=728 ALTO=544 bash captura.sh captura`). El video se graba en `/dev/shm`, porque a 60 fps son unos 190 MB/s, más de lo que aguanta la microSD. Con el paquete es `imx296-captura <paso>`, y para capturar no hace falta `sudo` (sin `sudo` no revisa `dmesg`). Las capturas quedan en la carpeta actual o en `SALIDA`.
+- `scripts/placa/estado_paquete.sh`: foto de los archivos que toca el paquete. Con una antes de instalar y otra después de purgar, `diff` muestra lo que haya quedado.
 - `scripts/placa/prueba_modos.sh`: mide los fps de cada modo (y a 30 fps con VBLANK) con las marcas de tiempo, los compara con los calculados y comprueba que la exposición máxima dé imagen.
 - `scripts/placa/analizar_raw.py` (numpy): media, mínimo y máximo por cuadro, y los valores distintos (`--valores`, para el patrón de prueba).
 - `scripts/placa/raw16_a_gris8.py` (numpy) y `scripts/pc/gris8_a_mp4.sh` (ffmpeg): video MP4 y fotos.
@@ -194,7 +236,7 @@ Estos fallos son del módulo `vin_v4l2` de la imagen, no de este driver. Los dos
 
 Para evitarlos, hay que hacer `S_INPUT` justo después de abrir el dispositivo, en el mismo proceso que captura: con `v4l2-ctl`, `--set-input=0` en la misma invocación; en una aplicación propia, `VIDIOC_S_INPUT` antes de cualquier otro ioctl.
 
-**Parche:** `driver/vin/` corrige `vin_v4l2.ko` (es un módulo: no hay que tocar el kernel) para que esos dos casos devuelvan un error del ioctl en vez del *panic*: `ENODEV` en los controles y `EINVAL` en `STREAMON`. `S_INPUT` en la misma sesión sigue siendo necesario para capturar. Se instala en `/lib/modules/$(uname -r)/updates/` sin pisar el original; ver `driver/vin/README.md`. El release trae el `.ko` ya compilado.
+**Parche:** `driver/vin/` corrige `vin_v4l2.ko` (es un módulo: no hay que tocar el kernel) para que esos dos casos devuelvan un error del ioctl en vez del *panic*: `ENODEV` en los controles y `EINVAL` en `STREAMON`. `S_INPUT` en la misma sesión sigue siendo necesario para capturar. El paquete lo instala en `/lib/modules/$(uname -r)/updates/` sin pisar el original; para hacerlo a mano, ver `driver/vin/README.md`. El release trae el paquete y el `.ko` ya compilado.
 
 Otros detalles:
 

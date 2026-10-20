@@ -1,0 +1,14 @@
+#!/bin/sh
+set -e
+KVER=@KVER@
+if [ "$1" = configure ]; then
+	# updates/ tiene prioridad sobre kernel/ (/etc/depmod.d/ubuntu.conf): los originales no se tocan.
+	depmod -a "$KVER"
+	if [ -d /run/systemd/system ]; then
+		systemctl daemon-reload || true
+		systemctl enable imx296-camaras.service || true
+	fi
+	echo "imx296-vin: las cámaras se cargan en el próximo arranque (o ahora: sudo systemctl start imx296-camaras)."
+	echo "imx296-vin: el overlay se instala aparte, con confirmación: sudo imx296-overlay instalar"
+fi
+exit 0

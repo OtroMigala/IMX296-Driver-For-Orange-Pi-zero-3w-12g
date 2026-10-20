@@ -1,0 +1,160 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# Instala o quita el overlay de las cámaras IMX296 en /boot, con respaldo y confirmación.
+#
+# Uso: imx296-overlay estado
+#      sudo imx296-overlay instalar [imx296-vin|imx296-vin-cam2] [-s]   (por defecto imx296-vin)
+#      sudo imx296-overlay quitar [-s]
+#   -s: no preguntar (para scripts). Sin -s y sin terminal, no se aplica nada.
+#
+#   imx296-vin (CAM1 y CAM2 con este driver, recomendado) e imx296-vin-cam2 (solo CAM2) cambian
+#   los mismos nodos del device tree: se usa uno u otro. El cambio vale desde el próximo arranque.
+#   Para probar sin tocar /boot: ENTORNO=copia/orangepiEnv.txt DIR_USUARIO=copia/overlay-user
+set -euo pipefail
+ENTORNO=${ENTORNO:-/boot/orangepiEnv.txt}
+DIR_USUARIO=${DIR_USUARIO:-/boot/overlay-user}
+DIR_PAQUETE=${DIR_PAQUETE:-/usr/share/imx296-vin/overlays}
+NUESTROS="imx296-vin imx296-vin-cam2"
+tmp=""
+trap '[ -n "$tmp" ] && rm -f "$tmp"' EXIT
+
+uso() { sed -n '4,8p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+
+lista_actual() { sed -n 's/^user_overlays=//p' "$ENTORNO" | tail -1; }
+
+# Lista actual sin nuestros overlays, más los que se pasen como argumento.
+lista_nueva() {
+	local o l=""
+	for o in $(lista_actual); do
+		case " $NUESTROS " in *" $o "*) ;; *) l="$l $o" ;; esac
+	done
+	for o in "$@"; do l="$l $o"; done
+	echo "${l# }"
+}
+
+# Escribe en $2 el entorno con user_overlays=$1 (vacío: sin esa línea).
+escribir_entorno() {
+	local lista=$1 sal=$2
+	if grep -q '^user_overlays=' "$ENTORNO"; then
+		if [ -n "$lista" ]; then
+			sed "s|^user_overlays=.*|user_overlays=$lista|" "$ENTORNO" > "$sal"
+		else
+			sed '/^user_overlays=/d' "$ENTORNO" > "$sal"
+		fi
+	else
+		cat "$ENTORNO" > "$sal"
+		# Si al archivo le falta el salto de línea final, la línea nueva quedaría pegada.
+		[ -s "$sal" ] && [ -n "$(tail -c1 "$sal")" ] && echo >> "$sal"
+		if [ -n "$lista" ]; then echo "user_overlays=$lista" >> "$sal"; fi
+	fi
+}
+
+confirmar() {
+	[ "$SI" = 1 ] && return 0
+	if [ ! -t 0 ]; then
+		echo "Sin terminal para confirmar: no se aplicó nada (usar -s para no preguntar)."
+		exit 1
+	fi
+	read -r -p "¿Aplicar? [s/N] " r
+	[ "$r" = s ] || [ "$r" = S ] || { echo "Cancelado: no se cambió nada."; exit 1; }
+}
+
+# Reemplaza $ENTORNO por $1 con respaldo verificado y escritura atómica.
+aplicar_entorno() {
+	local nuevo=$1 respaldo
+	respaldo="$ENTORNO.antes-imx296-$(date +%Y%m%d-%H%M%S)"
+	cp -p "$ENTORNO" "$respaldo"
+	cmp -s "$ENTORNO" "$respaldo" || { echo "El respaldo $respaldo no coincide: no se cambió nada."; exit 1; }
+	install -m "$(stat -c %a "$ENTORNO")" "$nuevo" "$ENTORNO.nuevo"
+	mv -f "$ENTORNO.nuevo" "$ENTORNO"
+	sync
+	echo "Respaldo: $respaldo"
+}
+
+estado() {
+	local o f
+	echo "Entorno: $ENTORNO"
+	echo "  user_overlays=$(lista_actual)"
+	for o in $NUESTROS; do
+		f="$DIR_USUARIO/$o.dtbo"
+		if [ -e "$f" ]; then
+			if [ -e "$DIR_PAQUETE/$o.dtbo" ] && cmp -s "$f" "$DIR_PAQUETE/$o.dtbo"; then
+				echo "  $f: instalado (igual al del paquete)"
+			else
+				echo "  $f: instalado (distinto del del paquete)"
+			fi
+		fi
+	done
+	for o in sensor0 sensor2; do
+		f=$(find /sys/firmware/devicetree/base -name "${o}_mname" 2>/dev/null | head -1)
+		[ -n "$f" ] && echo "  device tree en uso: ${o}_mname = $(tr -d '\0' < "$f")"
+	done
+	return 0
+}
+
+instalar() {
+	local o=$1 nueva copiar=1
+	case " $NUESTROS " in *" $o "*) ;; *) echo "Overlay desconocido: $o"; uso ;; esac
+	[ -e "$DIR_PAQUETE/$o.dtbo" ] || { echo "Falta $DIR_PAQUETE/$o.dtbo"; exit 1; }
+	nueva=$(lista_nueva "$o")
+	[ -e "$DIR_USUARIO/$o.dtbo" ] && cmp -s "$DIR_PAQUETE/$o.dtbo" "$DIR_USUARIO/$o.dtbo" && copiar=0
+	if [ "$nueva" = "$(lista_actual)" ] && [ $copiar = 0 ]; then
+		echo "$o ya está instalado y activo: nada que hacer."
+		return 0
+	fi
+	tmp=$(mktemp)
+	escribir_entorno "$nueva" "$tmp"
+	echo "Cambios en $ENTORNO:"
+	diff -u "$ENTORNO" "$tmp" || true
+	[ $copiar = 1 ] && echo "Se copia $DIR_PAQUETE/$o.dtbo a $DIR_USUARIO/"
+	confirmar
+	mkdir -p "$DIR_USUARIO"
+	[ $copiar = 1 ] && install -m 644 "$DIR_PAQUETE/$o.dtbo" "$DIR_USUARIO/$o.dtbo"
+	cmp -s "$ENTORNO" "$tmp" || aplicar_entorno "$tmp"
+	sync
+	echo "Listo: $o se aplica en el próximo arranque (U-Boot muestra \"Applying user provided DT overlay $o.dtbo\")."
+}
+
+quitar() {
+	local nueva o hay=0
+	nueva=$(lista_nueva)
+	for o in $NUESTROS; do [ -e "$DIR_USUARIO/$o.dtbo" ] && hay=1; done
+	if [ "$nueva" = "$(lista_actual)" ] && [ $hay = 0 ]; then
+		echo "Ningún overlay de imx296 instalado: nada que hacer."
+		return 0
+	fi
+	tmp=$(mktemp)
+	escribir_entorno "$nueva" "$tmp"
+	echo "Cambios en $ENTORNO:"
+	diff -u "$ENTORNO" "$tmp" || true
+	for o in $NUESTROS; do [ -e "$DIR_USUARIO/$o.dtbo" ] && echo "Se borra $DIR_USUARIO/$o.dtbo"; done
+	confirmar
+	cmp -s "$ENTORNO" "$tmp" || aplicar_entorno "$tmp"
+	for o in $NUESTROS; do rm -f "$DIR_USUARIO/$o.dtbo"; done
+	sync
+	echo "Listo: desde el próximo arranque, el device tree original de la placa."
+}
+
+SI=0
+args=()
+for a in "$@"; do
+	case "$a" in
+		-s) SI=1 ;;
+		-h|--help) uso ;;
+		*) args+=("$a") ;;
+	esac
+done
+set -- "${args[@]}"
+[ $# -ge 1 ] || uso
+[ -e "$ENTORNO" ] || { echo "No existe $ENTORNO"; exit 1; }
+if [ "$1" != estado ] && [ ! -w "$ENTORNO" ]; then
+	echo "Sin permiso para escribir $ENTORNO (usar sudo)."
+	exit 1
+fi
+
+case "$1" in
+	estado) estado ;;
+	instalar) instalar "${2:-imx296-vin}" ;;
+	quitar) quitar ;;
+	*) uso ;;
+esac

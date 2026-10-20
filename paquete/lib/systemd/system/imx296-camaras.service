@@ -1,0 +1,17 @@
+[Unit]
+Description=Cámaras IMX296: carga VIN y el driver imx296_mipi
+Documentation=https://github.com/OtroMigala/IMX296-Driver-For-Orange-Pi-zero-3w-12g
+After=local-fs.target systemd-modules-load.service
+# Para no cargar VIN en un arranque: imx296.noload en la línea de comandos del kernel.
+ConditionKernelCommandLine=!imx296.noload
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/imx296-vin/cargar-camaras
+# VIN tarda unos segundos (enciende cada sensor 500 ms para detectarlo).
+TimeoutStartSec=120
+# Sin ExecStop: descargar VIN no está probado; los módulos quedan cargados hasta reiniciar.
+
+[Install]
+WantedBy=multi-user.target

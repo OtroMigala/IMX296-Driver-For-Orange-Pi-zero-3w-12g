@@ -1,0 +1,13 @@
+#!/bin/sh
+set -e
+KVER=@KVER@
+case "$1" in
+	remove|purge)
+		if [ -d "/lib/modules/$KVER" ]; then depmod -a "$KVER"; fi
+		if [ -d /run/systemd/system ]; then systemctl daemon-reload || true; fi
+		;;
+esac
+if [ "$1" = purge ]; then
+	rm -rf /var/lib/imx296-vin
+fi
+exit 0

@@ -1,0 +1,16 @@
+Package: imx296-vin
+Version: @VERSION@
+Architecture: arm64
+Maintainer: Juan Alejandro <136948983+OtroMigala@users.noreply.github.com>
+Depends: kmod
+Recommends: v4l-utils, python3-numpy
+Section: kernel
+Priority: optional
+Homepage: https://github.com/OtroMigala/IMX296-Driver-For-Orange-Pi-zero-3w-12g
+Description: Driver VIN de la cámara Sony IMX296 para la Orange Pi Zero 3W
+ Driver imx296_mipi (Raspberry Pi Global Shutter Camera) y vin_v4l2 con los
+ parches para los dos kernel panics de VIN, compilados para el kernel
+ @KVER@ de la imagen oficial 1.0.2. Carga las cámaras al
+ arrancar (servicio imx296-camaras) e incluye las herramientas de captura.
+ .
+ El overlay del device tree no se instala solo: sudo imx296-overlay instalar.

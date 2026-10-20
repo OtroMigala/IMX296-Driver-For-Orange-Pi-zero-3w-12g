@@ -1,0 +1,18 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: imx296-vin
+Source: https://github.com/OtroMigala/IMX296-Driver-For-Orange-Pi-zero-3w-12g
+
+Files: *
+Copyright: 2026 Proyecto Ticanor
+License: GPL-2.0
+Comment:
+ imx296_mipi.ko se deriva de bsp/drivers/vin/modules/sensor/imx219.c e
+ imx290_mipi.c (Allwinner, GPL-2.0-or-later) y de drivers/media/i2c/imx296.c
+ del kernel principal de Linux (Laurent Pinchart, GPL-2.0) y de su versión de
+ Raspberry Pi. vin_v4l2.ko es bsp/drivers/vin del kernel de Orange Pi (rama
+ orange-pi-6.6-sun60iw2, commit 8a9be72; Allwinner, GPL-2.0-or-later) con los
+ parches de driver/vin/ del repositorio, que es su fuente.
+
+License: GPL-2.0
+ On Debian systems, the complete text of the GNU General Public License
+ version 2 can be found in /usr/share/common-licenses/GPL-2.

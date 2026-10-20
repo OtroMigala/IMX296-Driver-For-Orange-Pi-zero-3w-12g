@@ -1,0 +1,55 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# Carga VIN y el driver imx296_mipi al arrancar (servicio imx296-camaras) y dice qué conectores
+# quedaron con cámara.
+#
+# Protección contra un bucle de reinicios: con panic=10, si cargar VIN provocara un panic, la
+# placa se reiniciaría y volvería a intentarlo. Antes de cargar se deja una marca, que se borra
+# al terminar; si al arrancar la marca existe, la carga anterior se cortó y no se reintenta.
+# Para reintentar: sudo rm /var/lib/imx296-vin/cargando && sudo systemctl restart imx296-camaras
+# Para saltar la carga en un arranque: imx296.noload en la línea de comandos del kernel. Desde la
+# consola serie: una tecla en "Hit any key to stop autoboot" (1 s) y, en U-Boot,
+# setenv extraboardargs imx296.noload y boot. extraargs no sirve: boot.scr lo vuelve a leer de
+# /boot/orangepiEnv.txt.
+set -u
+MARCA=/var/lib/imx296-vin/cargando
+
+if [ -e "$MARCA" ]; then
+	echo "La carga de VIN se cortó en un arranque anterior ($(cat "$MARCA")): no se reintenta."
+	echo "Para reintentar: sudo rm $MARCA && sudo systemctl restart imx296-camaras"
+	exit 1
+fi
+mkdir -p "${MARCA%/*}"
+echo "arranque $(cat /proc/sys/kernel/random/boot_id), $(date -u +%FT%TZ)" > "$MARCA"
+sync "$MARCA"
+
+# softdep (/lib/modprobe.d/imx296-vin.conf): vin_io -> imx296_mipi -> vin_v4l2.
+modprobe vin_v4l2
+rc=$?
+rm -f "$MARCA"
+sync "${MARCA%/*}"
+if [ $rc -ne 0 ]; then
+	echo "modprobe vin_v4l2 falló (rc=$rc)"
+	exit 1
+fi
+
+# CAM1 = sensor0 -> vinc0 -> /dev/video0; CAM2 = sensor2 -> vinc8 -> /dev/video8 (DT de la placa).
+# VIN solo crea el nodo de video de un conector si su sensor respondió.
+listas=0
+for c in "CAM1 imx296_mipi /dev/video0" "CAM2 imx296_mipi_2 /dev/video8"; do
+	read -r con sensor video <<< "$c"
+	sd=$(grep -lx "$sensor" /sys/class/video4linux/v4l-subdev*/name 2>/dev/null | head -1)
+	if [ -z "$sd" ]; then
+		echo "$con: sin cámara"
+		continue
+	fi
+	for _ in $(seq 50); do [ -e "$video" ] && break; sleep 0.2; done
+	if [ -e "$video" ]; then
+		echo "$con: lista en $video (sensor en /dev/$(basename "$(dirname "$sd")"))"
+		listas=$((listas + 1))
+	else
+		echo "$con: el sensor respondió pero no apareció $video"
+	fi
+done
+[ $listas -gt 0 ] || { echo "ninguna cámara detectada"; exit 1; }
+exit 0

@@ -1,0 +1,12 @@
+#!/bin/sh
+# Los módulos están compilados para un kernel exacto: en otro no cargarían (vermagic distinto).
+set -e
+KVER=@KVER@
+if [ ! -d "/lib/modules/$KVER" ]; then
+	echo "imx296-vin: este paquete es para el kernel $KVER, que no está instalado." >&2
+	exit 1
+fi
+if [ "$(uname -r)" != "$KVER" ]; then
+	echo "imx296-vin: aviso: el kernel en uso es $(uname -r), no $KVER; los módulos solo cargan con $KVER." >&2
+fi
+exit 0
