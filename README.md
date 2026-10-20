@@ -172,6 +172,7 @@ Con la configuración de fábrica de la imagen, un *kernel panic* como los de VI
 | Watchdog por hardware | `config/etc/systemd/system.conf.d/90-watchdog.conf` | Cubre los cuelgues que no llegan a *panic*. **16 s es el máximo del hardware** (`sunxi-wdt`): con un valor mayor, systemd 249 deja el watchdog armado sin atenderlo y la placa se reinicia a los 16 s de cada arranque |
 | Journal en la microSD | `config/etc/systemd/journald.conf.d/90-persistente.conf` y `ENABLED=false` en `/etc/default/orangepi-ramlog` | La imagen guarda el journal en RAM y `/var/log` en una zram que solo se copia a la microSD una vez al día o al apagar limpio |
 | Commit de ext4 cada 5 s | `commit=600` → `commit=5` en `/etc/fstab` | Con 600, un corte puede perder los últimos 10 minutos de escrituras |
+| SysRq solo para sync | `config/etc/sysctl.d/90-sysrq.conf` (`kernel.sysrq = 16`) | La imagen trae 176, que permite reiniciar y apagar, y el kernel acepta SysRq por la consola serie: un BREAK (por ejemplo, al desconectarse o suspenderse el adaptador USB-serie) más un carácter cualquiera pueden reiniciar la placa. `/proc/sysrq-trigger` sigue funcionando |
 | Registro de arranques y temperaturas | `config/usr/local/sbin/registro-placa` y los servicios `registro-arranque` y `registro-temperatura` | Anota en `/var/log/arranques.log` si el arranque anterior terminó limpio y, si no, guarda el final de su journal en `/var/log/arranques/`. Escribe una línea de temperaturas en el journal cada 30 s |
 
 Instalación, desde la carpeta del repositorio copiada en la placa:
@@ -183,6 +184,7 @@ sudo findmnt --verify && sudo mount -o remount /        # relee fstab: si falla,
 sudo sh -c 'echo extraargs=panic=10 >> /boot/orangepiEnv.txt'  # si ya hay "extraargs=", sumarlo a esa línea
 sudo install -D -m 644 config/etc/systemd/system.conf.d/90-watchdog.conf /etc/systemd/system.conf.d/90-watchdog.conf
 sudo install -D -m 644 config/etc/systemd/journald.conf.d/90-persistente.conf /etc/systemd/journald.conf.d/90-persistente.conf
+sudo install -m 644 config/etc/sysctl.d/90-sysrq.conf /etc/sysctl.d/ && sudo sysctl -p /etc/sysctl.d/90-sysrq.conf
 sudo install -m 755 config/usr/local/sbin/registro-placa /usr/local/sbin/
 sudo install -m 644 config/etc/systemd/system/registro-*.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable registro-arranque registro-temperatura

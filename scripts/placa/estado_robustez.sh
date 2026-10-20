@@ -11,6 +11,7 @@ t "panic"
 echo "kernel.panic = $(cat /proc/sys/kernel/panic)   (10 = reinicia 10 s después de un panic; 0 = queda colgada)"
 echo "panic_on_oops = $(cat /proc/sys/kernel/panic_on_oops)   panic_on_warn = $(cat /proc/sys/kernel/panic_on_warn)"
 echo "línea de comandos: $(tr ' ' '\n' < /proc/cmdline | grep -E '^(panic|oops|loglevel)=' | tr '\n' ' ')"
+echo "kernel.sysrq = $(cat /proc/sys/kernel/sysrq)   (16 = solo sync por teclado/serie; 176 permite reiniciar y apagar con un BREAK)"
 
 t "watchdog"
 systemctl show -p RuntimeWatchdogUSec -p RebootWatchdogUSec | tr '\n' ' '; echo
