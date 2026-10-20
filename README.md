@@ -15,6 +15,7 @@ La imagen de Orange Pi solo soporta la cámara IMX219. El driver de la IMX296 de
 | Dos cámaras a la vez | Sin probar |
 | Disparo externo (XTR) para sincronizar el par estéreo | `trigger_mode = 1` implementado, sin probar (requiere modificar la cámara) |
 | Exposición automática | Pendiente |
+| Robustez de la placa (`config/`) | Tras un *kernel panic* vuelve sola por SSH en ~46 s; si queda colgada, el watchdog la reinicia a los 16 s. El journal sobrevive a los cortes |
 
 ## Hardware probado
 
@@ -33,8 +34,12 @@ overlays/imx296-vin-cam2.dts    variante solo para CAM2
 overlays/pruebas/               overlay para probar el driver del kernel principal (identifica el sensor, sin imagen)
 build/                          compilación cruzada en Docker: compilar.ps1 (Windows), compilar_linux.sh (Linux)
 scripts/descargar_fuentes.sh    descarga las fuentes necesarias para compilar (en el PC)
-scripts/placa/                  en la placa: captura.sh, prueba_i2c.sh, info_placa.sh, raw16_a_gris8.py
-scripts/pc/                     en el PC: raw_a_png.py, gris8_a_mp4.sh
+scripts/placa/                  en la placa: captura.sh, prueba_i2c.sh, info_placa.sh, raw16_a_gris8.py,
+                                estado_robustez.sh, prueba_termica.sh
+scripts/pc/                     en el PC: raw_a_png.py, gris8_a_mp4.sh; en Windows, serie_grabar.ps1 y
+                                esperar_ssh.ps1 (grabar la consola serie y medir reinicios)
+config/                         configuración de la placa para que se recupere sola de un fallo (ver
+                                "Robustez de la placa"), con las mismas rutas que en el sistema
 ```
 
 ## Compilación (en el PC, con Docker)
@@ -124,6 +129,8 @@ La exposición y la ganancia se fijan por parámetros porque, con `isp_used = 1`
 - `scripts/placa/raw16_a_gris8.py` (numpy) y `scripts/pc/gris8_a_mp4.sh` (ffmpeg): video MP4 y fotos.
 - `scripts/pc/raw_a_png.py` (sin dependencias): RAW → PNG, `py -3 raw_a_png.py cam2.raw 1456 1088 cam2`.
 - `scripts/placa/info_placa.sh` y `scripts/placa/prueba_i2c.sh`: inventario y prueba de I2C sin VIN. Para CAM2, `sudo ./prueba_i2c.sh 9 PE10`; para CAM1, `sudo ./prueba_i2c.sh 11 PE6`.
+- `scripts/placa/prueba_termica.sh`: minutos en reposo y luego captura continua a 60 fps, con las temperaturas cada 5 s en un CSV y un resumen de cuadros y saltos de secuencia. Conviene lanzarlo con `sudo systemd-run --unit=prueba-termica bash prueba_termica.sh 10 10`, para que siga aunque se corte el SSH. Con disipador: ~45 °C de media capturando, 36 000 cuadros sin saltos.
+- `scripts/pc/serie_grabar.ps1` y `scripts/pc/esperar_ssh.ps1` (Windows): graban la consola serie con la hora UTC de cada línea y miden cuánto tarda en volver el SSH después de un reinicio.
 
 ## Problemas conocidos de VIN
 
@@ -140,6 +147,43 @@ Otros detalles:
 - VIN imprime avisos como `scaler get_selection error` o `video8 has already stream off`; no afectan la captura.
 - Las marcas de tiempo de los buffers son monotónicas y se toman al final del cuadro (`ts-src-eof`). El centro de la exposición queda unos 16,1 ms antes (lectura de 1088 líneas de 14,8 µs) más media exposición.
 - Para depurar sirven `sudo dmesg -n 8` y una consola serie (pines 6, 8 y 10, 115200 baudios). Con el nivel de log por defecto, un *panic* de VIN no se ve y parece un cuelgue.
+
+## Robustez de la placa
+
+Con la configuración de fábrica de la imagen, un *kernel panic* como los de VIN deja la placa colgada hasta desenchufarla, y no queda registro de lo que pasó: el journal y `/var/log` viven en RAM. `config/` trae lo necesario para que la placa se reinicie sola y conserve el registro. No toca el kernel ni el device tree.
+
+| Qué | Dónde | Por qué |
+|---|---|---|
+| Reiniciar 10 s después de un *panic* | `extraargs=panic=10` en `/boot/orangepiEnv.txt` | La imagen trae `CONFIG_PANIC_TIMEOUT=0`, y por línea de comandos vale desde el primer instante del arranque |
+| Watchdog por hardware | `config/etc/systemd/system.conf.d/90-watchdog.conf` | Cubre los cuelgues que no llegan a *panic*. **16 s es el máximo del hardware** (`sunxi-wdt`): con un valor mayor, systemd 249 deja el watchdog armado sin atenderlo y la placa se reinicia a los 16 s de cada arranque |
+| Journal en la microSD | `config/etc/systemd/journald.conf.d/90-persistente.conf` y `ENABLED=false` en `/etc/default/orangepi-ramlog` | La imagen guarda el journal en RAM y `/var/log` en una zram que solo se copia a la microSD una vez al día o al apagar limpio |
+| Commit de ext4 cada 5 s | `commit=600` → `commit=5` en `/etc/fstab` | Con 600, un corte puede perder los últimos 10 minutos de escrituras |
+| Registro de arranques y temperaturas | `config/usr/local/sbin/registro-placa` y los servicios `registro-arranque` y `registro-temperatura` | Anota en `/var/log/arranques.log` si el arranque anterior terminó limpio y, si no, guarda el final de su journal en `/var/log/arranques/`. Escribe una línea de temperaturas en el journal cada 30 s |
+
+Instalación, desde la carpeta del repositorio copiada en la placa:
+
+```bash
+sudo cp -p /etc/fstab /etc/fstab.bak && sudo cp -p /boot/orangepiEnv.txt /boot/orangepiEnv.txt.bak
+sudo sed -i 's/,commit=600,/,commit=5,/' /etc/fstab
+sudo findmnt --verify && sudo mount -o remount /        # relee fstab: si falla, no reiniciar
+sudo sh -c 'echo extraargs=panic=10 >> /boot/orangepiEnv.txt'  # si ya hay "extraargs=", sumarlo a esa línea
+sudo install -D -m 644 config/etc/systemd/system.conf.d/90-watchdog.conf /etc/systemd/system.conf.d/90-watchdog.conf
+sudo install -D -m 644 config/etc/systemd/journald.conf.d/90-persistente.conf /etc/systemd/journald.conf.d/90-persistente.conf
+sudo install -m 755 config/usr/local/sbin/registro-placa /usr/local/sbin/
+sudo install -m 644 config/etc/systemd/system/registro-*.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable registro-arranque registro-temperatura
+sudo /usr/lib/orangepi/orangepi-ramlog write             # copia a la microSD lo que hay en la zram
+sudo sed -i 's/^ENABLED=true$/ENABLED=false/' /etc/default/orangepi-ramlog
+sudo reboot
+```
+
+Después, `sudo bash scripts/placa/estado_robustez.sh` muestra el estado de cada defensa. Algunos detalles:
+
+- **Leer el journal de un arranque anterior:** `journalctl -b <boot id>`, con el ID que anota `/var/log/arranques.log`. Después de un corte, `journalctl -b -1` puede no encontrarlo: la placa no tiene RTC, la hora vuelve a la última que guardó `fake-hwclock` y journalctl se confunde con arranques superpuestos en el tiempo.
+- Lo que se escribe en los últimos ~10 s antes de un *panic* se pierde (`SyncIntervalSec=10s`); el mensaje del *panic* mismo solo se ve por la consola serie (la imagen no trae pstore ni netconsole).
+- Para ver el watchdog no conviene usar `wdctl`: este kernel no trae `CONFIG_WATCHDOG_SYSFS`, así que `wdctl` abre el dispositivo, y eso lo arma.
+- No activar `kernel.panic_on_warn`: la imagen genera un WARNING inofensivo en cada arranque (driver USB de Allwinner, al escribir `otg_role`), y la placa entraría en *panic* siempre.
+- Para probarlo, con la consola serie conectada y después de un `sync`: `echo c | sudo tee /proc/sysrq-trigger` provoca un *panic*.
 
 ## Precauciones de hardware
 

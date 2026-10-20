@@ -1,0 +1,14 @@
+[Unit]
+Description=Temperaturas de la placa al journal cada 30 s
+After=systemd-journal-flush.service
+
+[Service]
+ExecStart=/usr/local/sbin/registro-placa temperatura
+# registro-placa arranque busca la última temperatura del arranque anterior por este nombre.
+SyslogIdentifier=temperatura
+Nice=10
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

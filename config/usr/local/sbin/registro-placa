@@ -1,0 +1,68 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# Rastro de la placa para diagnosticar reinicios inesperados. Requiere el journal persistente
+# (journald.conf.d/90-persistente.conf).
+#
+# Uso: registro-placa arranque     una línea por arranque en /var/log/arranques.log con cómo
+#                                  terminó el anterior; si no terminó limpio, guarda sus últimas
+#                                  líneas del journal en /var/log/arranques/<boot id>.txt
+#      registro-placa temperatura  una línea de temperaturas al journal cada 30 s (servicio fijo)
+#
+# El hardware no dice por qué se reinició (U-Boot no lo informa y sunxi-wdt no implementa
+# bootstatus). Lo que sí se sabe es si el arranque anterior se apagó limpio: en ese caso, su
+# journal termina con "Journal stopped". Si no, fue un panic, el watchdog o un corte de energía,
+# y la última temperatura registrada ayuda a distinguir un reinicio térmico.
+#
+# El arranque anterior se busca por su boot ID, guardado en $ESTADO, y no con "journalctl -b -1":
+# sin RTC, tras un corte la hora vuelve a la última guardada por fake-hwclock, que es anterior a
+# las últimas entradas del arranque caído, y journalctl 249 deja de ver ese arranque en
+# --list-boots. Filtrar por _BOOT_ID no depende de la hora.
+set -u
+
+ID_JOURNAL_STOPPED=d93fb3c9c24d451a97cea615ce59c00b
+ESTADO=/var/lib/registro-placa/arranque_actual
+
+arranque() {
+	local actual anterior fin temp
+	actual=$(tr -d - < /proc/sys/kernel/random/boot_id)
+	anterior=$(cat "$ESTADO" 2>/dev/null)
+	[ "$anterior" = "$actual" ] && anterior=   # el servicio corrió dos veces en el mismo arranque
+	if [ -z "$anterior" ] || ! journalctl _BOOT_ID="$anterior" -q --no-pager -n 1 2>/dev/null | grep -q .; then
+		fin=sin_datos
+	# Solo cuenta si está entre las últimas entradas: un "systemctl restart systemd-journald"
+	# también escribe "Journal stopped", pero a mitad del arranque.
+	elif journalctl _BOOT_ID="$anterior" -q --no-pager -n 3 -o export 2>/dev/null |
+			grep -q "^MESSAGE_ID=$ID_JOURNAL_STOPPED"; then
+		fin=limpio
+	else
+		fin=NO_LIMPIO
+		mkdir -p /var/log/arranques
+		journalctl _BOOT_ID="$anterior" -q --no-pager -n 100 -o short-monotonic \
+			> "/var/log/arranques/$anterior.txt" 2>&1
+	fi
+	[ -n "$anterior" ] && temp=$(journalctl _BOOT_ID="$anterior" -q --no-pager -t temperatura -n 1 -o cat 2>/dev/null)
+	mkdir -p "${ESTADO%/*}"
+	echo "$actual" > "$ESTADO" && sync "$ESTADO"
+	# Sin RTC, la hora viene de fake-hwclock hasta que chrony sincroniza: se anota si ya lo hizo.
+	echo "$(date -u +%FT%TZ) hora_sincronizada=$(timedatectl show -p NTPSynchronized --value)" \
+		"arranque=$actual anterior=${anterior:--} fin_anterior=$fin panic=$(cat /proc/sys/kernel/panic)" \
+		"ultima_temp_anterior=\"${temp:--}\"" | tee -a /var/log/arranques.log
+}
+
+temperatura() {
+	local z linea
+	while :; do
+		linea="°C"
+		for z in /sys/class/thermal/thermal_zone*; do
+			linea+=" $(sed 's/_thermal_zone$//; s/_zone$//' "$z/type")=$(awk '{printf "%.1f", $1 / 1000}' "$z/temp")"
+		done
+		echo "$linea"
+		sleep 30
+	done
+}
+
+case "${1:-}" in
+	arranque) arranque ;;
+	temperatura) temperatura ;;
+	*) echo "Uso: $0 arranque|temperatura" >&2; exit 1 ;;
+esac
