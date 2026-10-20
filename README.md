@@ -15,6 +15,7 @@ La imagen de Orange Pi solo soporta la cámara IMX219. El driver de la IMX296 de
 | Dos cámaras a la vez | Sin probar |
 | Disparo externo (XTR) para sincronizar el par estéreo | `trigger_mode = 1` implementado, sin probar (requiere modificar la cámara) |
 | Exposición automática | Pendiente |
+| Parche de VIN (`driver/vin/`) | Los dos usos de VIN que daban *kernel panic* devuelven un error (`ENODEV` / `EINVAL`); la captura normal no cambia |
 | Robustez de la placa (`config/`) | Tras un *kernel panic* vuelve sola por SSH en ~46 s; si queda colgada, el watchdog la reinicia a los 16 s. El journal sobrevive a los cortes |
 
 ## Hardware probado
@@ -29,10 +30,12 @@ La imagen de Orange Pi solo soporta la cámara IMX219. El driver de la IMX296 de
 ```
 driver/imx296_mipi.c            driver VIN, dos instancias: imx296_mipi (CAM1) e imx296_mipi_2 (CAM2)
 driver/integracion_vin.patch    Kconfig/Makefile para compilarlo dentro del kernel de Orange Pi
+driver/vin/                     parches de vin_v4l2.ko para los dos panics de VIN, con su explicación
 overlays/imx296-vin.dts         overlay de usuario: CAM1 y CAM2 con este driver (recomendado)
 overlays/imx296-vin-cam2.dts    variante solo para CAM2
 overlays/pruebas/               overlay para probar el driver del kernel principal (identifica el sensor, sin imagen)
-build/                          compilación cruzada en Docker: compilar.ps1 (Windows), compilar_linux.sh (Linux)
+build/                          compilación cruzada en Docker: compilar.ps1 (Windows), compilar_linux.sh (Linux),
+                                compilar_vin.sh (VIN con los parches de driver/vin/)
 scripts/descargar_fuentes.sh    descarga las fuentes necesarias para compilar (en el PC)
 scripts/placa/                  en la placa: captura.sh, prueba_i2c.sh, info_placa.sh, raw16_a_gris8.py,
                                 estado_robustez.sh, prueba_termica.sh
@@ -73,6 +76,15 @@ docker run --rm -v "${PWD}\driver:/driver:ro" opi-a733-kmod:6.6.98 sh -c 'perl $
 
 Para compilarlo dentro del kernel completo de Orange Pi, en vez de fuera del árbol, ver las instrucciones al principio de `driver/integracion_vin.patch`.
 
+VIN con los parches de `driver/vin/` (Linux, o Windows desde Git Bash):
+
+```bash
+build/compilar_vin.sh                       # build/salida/vin/parche/vin_v4l2.ko
+build/compilar_vin.sh --original --comparar <carpeta con vin_io.ko y vin_v4l2.ko de la imagen>
+```
+
+La segunda forma valida el entorno: sin parches, el VIN compilado sale idéntico al de la imagen (`srcversion`, bytes de código y relocalizaciones). El script pasa las fuentes a LF; un checkout en Windows las deja con CRLF y entonces no coincide `srcversion` ni se aplican los parches.
+
 ## Instalación en la placa
 
 1. Copiar a una misma carpeta de la placa (por ejemplo `~/port/`) `build/salida/imx296_mipi.ko`, `overlays/imx296-vin.dts` y el contenido de `scripts/placa/`. `captura.sh` busca el módulo en su propia carpeta; otra ubicación se indica con `PORT_DIR`.
@@ -106,7 +118,7 @@ v4l2-ctl -d /dev/video8 --set-input=0 \
   --stream-mmap=4 --stream-count=10 --stream-to=cam2.raw
 ```
 
-> **Importante:** `--set-input=0` (`VIDIOC_S_INPUT`) tiene que ir en el mismo proceso que captura. Sin eso, VIN provoca un *kernel panic* (ver más abajo).
+> **Importante:** `--set-input=0` (`VIDIOC_S_INPUT`) tiene que ir en el mismo proceso que captura. Sin eso, el VIN de la imagen provoca un *kernel panic*; con el parche de `driver/vin/`, `STREAMON` devuelve un error (ver más abajo).
 
 VIN entrega cada píxel en 16 bits little-endian, alineado a la derecha (valores de 0 a 1023, 2912 bytes por línea). Como VIN no tiene el formato Y10, la cámara mono se declara como `SRGGB10`, que usa el mismo empaquetado RAW10, y los datos se leen como gris.
 
@@ -139,7 +151,9 @@ Estos fallos son del módulo `vin_v4l2` de la imagen, no de este driver. Los dos
 1. **Leer controles antes de `VIDIOC_S_INPUT`** (`v4l2-ctl --list-ctrls`) cuando CAM1 no tiene un sensor válido: `vin_g_volatile_ctrl` consulta el sensor 0.
 2. **`STREAMON` sin `S_INPUT` en la misma sesión.** VIN habilita los enlaces del grafo de medios en `S_INPUT` y los deshabilita al cerrar el dispositivo. Sin enlaces, el formato no llega al CSI y `sunxi_csi_subdev_s_stream` usa un formato NULL.
 
-Para evitarlos, hay que hacer `S_INPUT` justo después de abrir el dispositivo, en el mismo proceso que captura: con `v4l2-ctl`, `--set-input=0` en la misma invocación; en una aplicación propia, `VIDIOC_S_INPUT` antes de cualquier otro ioctl. La solución de fondo sería parchear `vin_v4l2`, que es un módulo y no requiere tocar el kernel.
+Para evitarlos, hay que hacer `S_INPUT` justo después de abrir el dispositivo, en el mismo proceso que captura: con `v4l2-ctl`, `--set-input=0` en la misma invocación; en una aplicación propia, `VIDIOC_S_INPUT` antes de cualquier otro ioctl.
+
+**Parche:** `driver/vin/` corrige `vin_v4l2.ko` (es un módulo: no hay que tocar el kernel) para que esos dos casos devuelvan un error del ioctl en vez del *panic*: `ENODEV` en los controles y `EINVAL` en `STREAMON`. `S_INPUT` en la misma sesión sigue siendo necesario para capturar. Se instala en `/lib/modules/$(uname -r)/updates/` sin pisar el original; ver `driver/vin/README.md`. El release trae el `.ko` ya compilado.
 
 Otros detalles:
 

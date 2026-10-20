@@ -1,0 +1,116 @@
+Subject: [PATCH 2/2] vin: refuse to stream without S_INPUT instead of panicking
+
+VIN opens the pipeline and enables the media links (sensor -> mipi,
+csi -> tdm/isp) in VIDIOC_S_INPUT, and closing the video device undoes both.
+VIDIOC_S_FMT only reaches the CSI parser through enabled links, so after
+S_INPUT in one process and S_FMT + STREAMON in another one, csi->csi_fmt is
+still NULL and __csi_set_fmt_hw() dereferenced it during stream on:
+
+  Unable to handle kernel NULL pointer dereference at virtual address 0000000000000004
+  pc : sunxi_csi_subdev_s_stream+0x118 [vin_v4l2]
+  ... __vin_pipeline_s_stream
+
+Without S_INPUT in the session there is also no clean way out: vin_close()
+takes its early exit (sensor use_count == 0) and leaves VIN_STREAM set, so
+every later S_FMT and STREAMON fails until the module is reloaded.
+
+1. vidioc_streamon(): return -EINVAL before touching anything when the
+   pipeline was not opened in this session (no sensor subdev or sensor
+   use_count == 0, the same test vin_close() uses).
+
+2. sunxi_csi_subdev_s_stream(): as a last line of defense, return -EINVAL
+   when csi_fmt is NULL, before enabling pins, clock or parser. (-ENODEV
+   would not do: __vin_pipeline_s_stream() ignores it.)
+
+3. Pipeline error path. With kernel 6.6, call_s_stream() keeps track of the
+   subdev state and WARNs (and does nothing) when asked to stop a subdev that
+   failed to start, so:
+   - __vin_pipeline_s_stream() stops only the subdevs started before the one
+     that failed, and keeps the original error: overwriting ret with the
+     result of the undo steps reported a failed stream on as a success;
+   - __vin_subdev_set_stream() takes back the stream_count increment when
+     the start fails; otherwise the next stream on skips that subdev.
+
+A normal capture (S_INPUT, S_FMT and STREAMON in the same session) does not
+change.
+
+Applies after patch 1/2 to bsp/drivers/vin of linux-orangepi, branch
+orange-pi-6.6-sun60iw2 (commit 8a9be72), with patch -p1 from the kernel root.
+
+--- a/bsp/drivers/vin/vin-video/vin_video.c
++++ b/bsp/drivers/vin/vin-video/vin_video.c
+@@ -2158,6 +2158,19 @@
+ 		goto streamon_error;
+ 	}
+ 
++	/*
++	 * VIDIOC_S_INPUT opens the pipeline (sensor use_count) and enables the media links, and
++	 * closing the device undoes both; vin_close() uses the same test. Without S_INPUT in this
++	 * session, S_FMT does not reach the CSI parser: streaming crashed in
++	 * sunxi_csi_subdev_s_stream(), and vin_close() would leave VIN_STREAM set.
++	 */
++	if (!cap->pipe.sd[VIN_IND_SENSOR] || !cap->pipe.sd[VIN_IND_SENSOR]->entity.use_count) {
++		vin_err("video%d: no input selected, do VIDIOC_S_INPUT in the same session before streaming\n",
++			vinc->id);
++		ret = -EINVAL;
++		goto streamon_error;
++	}
++
+ 	ret = vb2_ioctl_streamon(file, priv, i);
+ 	if (ret)
+ 		goto streamon_error;
+--- a/bsp/drivers/vin/vin-csi/sunxi_csi.c
++++ b/bsp/drivers/vin/vin-csi/sunxi_csi.c
+@@ -513,6 +513,19 @@
+ 	__maybe_unused struct vin_md *vind = dev_get_drvdata(csi->subdev.v4l2_dev->dev);
+ 	__maybe_unused struct vin_core *vinc = NULL;
+ 
++	/*
++	 * csi_fmt is only set by set_fmt, which VIDIOC_S_FMT reaches through the media links
++	 * enabled by VIDIOC_S_INPUT. Without a format, __csi_set_fmt_hw() dereferenced NULL.
++	 * vidioc_streamon() now refuses to stream without S_INPUT; this check stays as a last
++	 * line of defense and fails before touching the hardware, so there is nothing to undo
++	 * (the pipeline error path does not stop the subdev that failed to start).
++	 */
++	if (enable && !csi->csi_fmt) {
++		vin_err("parser%d has no format: do VIDIOC_S_INPUT and VIDIOC_S_FMT in the same session before streaming\n",
++			csi->id);
++		return -EINVAL;
++	}
++
+ 	__csi_pin_config(csi, enable);
+ 	csic_prs_pclk_en(csi->id, enable);
+ 	if (enable) {
+--- a/bsp/drivers/vin/vin.c
++++ b/bsp/drivers/vin/vin.c
+@@ -1379,6 +1379,9 @@
+ 			csic_isp_bridge_enable(0);
+ 	}
+ #endif
++	/* a subdev that failed to start is not streaming: otherwise the next start is skipped */
++	if (on && ret < 0 && ret != -ENOIOCTLCMD)
++		(*stream_count)--;
+ 
+ 	return ret != -ENOIOCTLCMD ? ret : 0;
+ }
+@@ -1501,13 +1504,18 @@
+ 
+ 	return 0;
+ error:
+-	for (; i >= 0; i--) {
++	/*
++	 * The subdev at index i failed and did not start: stop only the ones before it (stopping
++	 * it too triggers the WARN_ON in call_s_stream()). Keep ret: returning the result of the
++	 * undo steps reported a failed stream on as a success to VIDIOC_STREAMON.
++	 */
++	for (i--; i >= 0; i--) {
+ 		unsigned int idx = seq[on_idx][i];
+ 		if (!p->sd[idx] || !p->sd[idx]->entity.graph_obj.mdev)
+ 			continue;
+ 		if (vinc->ptn_cfg.ptn_en && (idx <= VIN_IND_MIPI))
+ 			continue;
+-		ret = __vin_subdev_set_stream(p->sd[idx], idx, !on);
++		__vin_subdev_set_stream(p->sd[idx], idx, !on);
+ 	}
+ 	return ret;
+ }

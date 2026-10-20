@@ -1,0 +1,72 @@
+Subject: [PATCH 1/2] vin: fail controls and S_PARM when no sensor is selected
+
+Before VIDIOC_S_INPUT, vinc->sensor_sel is still 0 and the pipeline has no
+sensor subdev. If module 0 has no valid sensor (for example, an empty CAM1
+connector while the camera is on CAM2), get_valid_sensor() returns NULL, and
+reading the controls (v4l2-ctl --list-ctrls) dereferenced it in
+vin_g_volatile_ctrl(), which ended in a kernel panic:
+
+  Unable to handle kernel NULL pointer dereference at virtual address 000000000000001c
+  pc : vin_g_volatile_ctrl+0x78 [vin_v4l2]
+
+Return -ENODEV instead from vin_g_volatile_ctrl(), vin_s_ctrl(),
+__vin_s_parm() and vin_s_parm_special() when there is no valid sensor
+instance (or, for the controls, no sensor subdev in the pipeline yet).
+vin_s_ctrl() keeps setting the VOLATILE flags before the check, and the
+check comes before the VFLIP/HFLIP code, which writes DMA registers.
+
+After a successful VIDIOC_S_INPUT nothing changes: both pointers are set.
+
+Applies to bsp/drivers/vin of linux-orangepi, branch orange-pi-6.6-sun60iw2
+(commit 8a9be72, the VIN of the Orange Pi Zero 3W image 1.0.2), with patch -p1
+from the kernel root.
+
+--- a/bsp/drivers/vin/vin-video/vin_video.c
++++ b/bsp/drivers/vin/vin-video/vin_video.c
+@@ -2558,6 +2558,10 @@
+ 	cap->capture_mode = parms->parm.capture.capturemode;
+ 	vinc->large_image = parms->parm.capture.reserved[2];
+ 
++	/* sensor_sel may point to a module without a valid sensor (see vin_g_volatile_ctrl) */
++	if (!inst)
++		return -ENODEV;
++
+ 	if (WARN_ON(!cap->pipe.sd[VIN_IND_SENSOR] || !cap->pipe.sd[VIN_IND_CSI]))
+ 		return -EINVAL;
+ 
+@@ -3886,6 +3890,14 @@
+ 	struct v4l2_control c;
+ 	int ret = 0;
+ 
++	/*
++	 * Before VIDIOC_S_INPUT, sensor_sel is still 0 and the pipeline has no sensor subdev.
++	 * If module 0 has no valid sensor (e.g. an empty CAM1 connector), get_valid_sensor()
++	 * returns NULL: reading the controls then dereferenced NULL and caused a kernel panic.
++	 */
++	if (!inst || !sensor)
++		return -ENODEV;
++
+ 	c.id = ctrl->id;
+ 	if (inst->is_isp_used && inst->is_bayer_raw) {
+ 		switch (ctrl->id) {
+@@ -4160,6 +4172,10 @@
+ 		break;
+ 	}
+ 
++	/* no sensor selected yet (VIDIOC_S_INPUT), see vin_g_volatile_ctrl */
++	if (!inst || !sensor)
++		return -ENODEV;
++
+ 	c.id = ctrl->id;
+ 	c.value = ctrl->val;
+ 	switch (ctrl->id) {
+@@ -4569,6 +4585,9 @@
+ 	struct vin_vid_cap *cap = &vinc->vid_cap;
+ 	struct sensor_instance *inst = get_valid_sensor(vinc);
+ 	int ret = 0;
++
++	if (!inst)
++		return -ENODEV;
+ 	if (parms->parm.capture.capturemode != V4L2_MODE_VIDEO &&
+ 	    parms->parm.capture.capturemode != V4L2_MODE_IMAGE &&
+ 	    parms->parm.capture.capturemode != V4L2_MODE_PREVIEW) {

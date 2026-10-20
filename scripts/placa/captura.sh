@@ -33,7 +33,8 @@ case "$1" in
     sleep 2
     ls /dev/video* 2>&1
     # Bug de VIN: antes de VIDIOC_S_INPUT, sensor_sel = 0 (CAM1 sin sensor) y leer
-    # controles hace NULL deref en vin_g_volatile_ctrl. S_INPUT deja sensor_sel = 2.
+    # controles hace NULL deref en vin_g_volatile_ctrl (con el parche de driver/vin/, error
+    # ENODEV). S_INPUT deja sensor_sel = 2.
     timeout 20 v4l2-ctl -d $DEV --set-input=0; echo "set-input rc=$?"
     dmesg | grep -iE "imx296|registering|No such device|WARNING" | tail -6 ;;
   info)     timeout 20 v4l2-ctl -d $DEV --info; echo "rc=$?" ;;
@@ -48,10 +49,12 @@ case "$1" in
     rm -f "$OUT"
     # --set-input en la MISMA sesión: VIN habilita los enlaces sensor->mipi y csi->tdm/isp
     # en S_INPUT y los deshabilita al cerrar el dispositivo. Sin enlaces, S_FMT no llega al
-    # CSI (csi_fmt = NULL) y STREAMON cae en sunxi_csi_subdev_s_stream (NULL deref 0x4).
+    # CSI (csi_fmt = NULL) y STREAMON cae en sunxi_csi_subdev_s_stream (NULL deref 0x4); con
+    # el parche de driver/vin/, STREAMON devuelve EINVAL.
+    # 8 búferes: con 4, escribir cada cuadro (3 MB) a veces se atrasa y se pierde uno.
     timeout 60 v4l2-ctl -d $DEV --set-input=0 \
       --set-fmt-video=width=1456,height=1088,pixelformat=RG10 \
-      --stream-mmap=4 --stream-count=10 --stream-to="$OUT" --verbose 2>&1 | tail -25
+      --stream-mmap=8 --stream-count=10 --stream-to="$OUT" --verbose 2>&1 | tail -25
     echo "captura rc=${PIPESTATUS[0]}"
     sync; ls -l "$OUT" 2>&1
     timeout 20 v4l2-ctl -d $DEV --get-fmt-video | head -12 ;;

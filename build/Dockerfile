@@ -28,9 +28,10 @@ ENV KDIR=/usr/src/linux-headers-6.6.98-sun60iw2 \
     ARCH=arm64 \
     CROSS_COMPILE=aarch64-none-linux-gnu-
 
-# Perl completo para $KDIR/scripts/checkpatch.pl (revisión de estilo del driver).
+# Perl completo para $KDIR/scripts/checkpatch.pl (revisión de estilo del driver) y patch para
+# aplicar driver/vin/*.patch (compilar_vin.sh).
 RUN apt-get update \
- && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends perl \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends perl patch \
  && rm -rf /var/lib/apt/lists/*
 
 COPY compilar.sh /usr/local/bin/compilar.sh
