@@ -9,8 +9,8 @@ La imagen de Orange Pi solo soporta la cámara IMX219. El driver de la IMX296 de
 | Qué | Estado |
 |---|---|
 | Detección por I2C (conectores CAM1 y CAM2) | Funciona: `SENSOR_INFO` = 0xca00, IMX296LL (mono) |
-| Captura en CAM2 | **1456×1088 RAW10 a 60 fps**: 120 cuadros seguidos sin pérdidas, uno cada 16,667 ms ± 0,1 ms |
-| Rotación, exposición y ganancia | Parámetros del módulo |
+| Captura en CAM2 | RAW10 en tres modos: **1456×1088 a 60 fps**, 1456×544 (recorte) y 728×544 (binning 2×2) **a 100 fps**. Medido: fps ±0,001 % del valor calculado, sin saltos de secuencia |
+| Controles en vivo (`/dev/v4l-subdevN`) | Exposición y ganancia (en el mismo cuadro), VBLANK (fps menores, exposiciones de hasta 33 ms a 30 fps o más largas), espejo, patrón de prueba y temperatura del sensor |
 | Overlay para las dos cámaras | Funciona; con CAM1 vacío, VIN lo descarta sin errores |
 | Dos cámaras a la vez | Sin probar |
 | Disparo externo (XTR) para sincronizar el par estéreo | `trigger_mode = 1` implementado, sin probar (requiere modificar la cámara) |
@@ -37,8 +37,8 @@ overlays/pruebas/               overlay para probar el driver del kernel princip
 build/                          compilación cruzada en Docker: compilar.ps1 (Windows), compilar_linux.sh (Linux),
                                 compilar_vin.sh (VIN con los parches de driver/vin/)
 scripts/descargar_fuentes.sh    descarga las fuentes necesarias para compilar (en el PC)
-scripts/placa/                  en la placa: captura.sh, prueba_i2c.sh, info_placa.sh, raw16_a_gris8.py,
-                                estado_robustez.sh, prueba_termica.sh
+scripts/placa/                  en la placa: captura.sh, prueba_modos.sh, analizar_raw.py, raw16_a_gris8.py,
+                                prueba_i2c.sh, info_placa.sh, estado_robustez.sh, prueba_termica.sh
 scripts/pc/                     en el PC: raw_a_png.py, gris8_a_mp4.sh; en Windows, serie_grabar.ps1 y
                                 esperar_ssh.ps1 (grabar la consola serie y medir reinicios)
 config/                         configuración de la placa para que se recupere sola de un fallo (ver
@@ -115,29 +115,70 @@ CAM2 aparece como `/dev/video8`. CAM1 debería aparecer como `/dev/video0`, pero
 ```bash
 v4l2-ctl -d /dev/video8 --set-input=0 \
   --set-fmt-video=width=1456,height=1088,pixelformat=RG10 \
-  --stream-mmap=4 --stream-count=10 --stream-to=cam2.raw
+  --stream-mmap=8 --stream-count=10 --stream-to=cam2.raw
 ```
+
+Al grabar cuadros conviene usar 8 búferes o más (`--stream-mmap=8`): con 4, escribir cada cuadro de 3 MB a veces se atrasa y se pierde uno de cada ~120 (pasa igual con el VIN original).
 
 > **Importante:** `--set-input=0` (`VIDIOC_S_INPUT`) tiene que ir en el mismo proceso que captura. Sin eso, el VIN de la imagen provoca un *kernel panic*; con el parche de `driver/vin/`, `STREAMON` devuelve un error (ver más abajo).
 
 VIN entrega cada píxel en 16 bits little-endian, alineado a la derecha (valores de 0 a 1023, 2912 bytes por línea). Como VIN no tiene el formato Y10, la cámara mono se declara como `SRGGB10`, que usa el mismo empaquetado RAW10, y los datos se leen como gris.
 
+### Modos
+
+VIN elige el modo según el tamaño pedido en `--set-fmt-video`: el más chico que sea mayor o igual.
+
+| Modo | Cómo | fps por defecto | Exposición máxima | Bytes por cuadro |
+|---|---|---|---|---|
+| 1456×1088 | completo | 60,00 (VMAX 1125) | 16,6 ms (33,3 ms a 30 fps) | 3 168 256 |
+| 1456×544 | recorte vertical centrado (filas 272 a 815) | 100,00 (VMAX 675) | 9,94 ms | 1 584 128 |
+| 728×544 | binning 2×2: campo completo a media resolución, ~4 veces más señal | 100,00 (VMAX 675) | 9,94 ms | 800 768 (con relleno al final) |
+
+La línea dura siempre 14,815 µs: por eso un recorte horizontal no da más fps, y sí uno vertical. Cada cuadro dura VMAX líneas, con VMAX = alto + VBLANK, y los fps son 67 500 / VMAX. Con `vertical_blanking` se bajan los fps y se alarga la exposición máxima, pero no se pueden subir por encima de los del modo: VIN dimensiona sus búferes y su tasa de envío según esos fps. El mismo VBLANK se mantiene mientras no cambie el modo; al cambiarlo, vuelve al valor del modo nuevo. Por eso, si se quiere otro VBLANK, primero se elige el modo y después se fija el control.
+
+En 728×544, VIN agrega 8704 bytes de relleno al final de cada cuadro (`Size Image` = 800 768): los conversores de `scripts/` aceptan el tamaño real del cuadro (`--tam-cuadro`).
+
+### Controles del sensor
+
+Se manejan en el subdispositivo del sensor (`/dev/v4l-subdev0` con CAM1 vacío; `sudo bash captura.sh controles` lo encuentra), en vivo o antes de capturar. Fuera de transmisión solo se guardan y se aplican al arrancar. Los controles de exposición y ganancia del nodo de video, en cambio, van al ISP de VIN (`isp_used = 1` en el device tree) y no al sensor.
+
+| Control | Unidad y rango | Notas |
+|---|---|---|
+| `exposure` | líneas de 14,815 µs, de 1 a VMAX − 4 | Se recorta al aplicarse. Con SHS1 = VMAX − exposición menor que 4, el sensor entrega cuadros negros (medido) |
+| `analogue_gain` | pasos de 0,1 dB, de 0 a 480 (48 dB) | Exposición y ganancia cambian en el mismo cuadro (bloque REGHOLD) |
+| `vertical_blanking` | líneas | Ver "Modos" |
+| `horizontal_flip`, `vertical_flip` | 0/1 | Por defecto 1 y 1 (el sensor va montado invertido) |
+| `test_pattern` | menú de 9 patrones | Los valores salen exactos (0x100 y 0x300): sirve para probar la cadena sin luz |
+| `temperature_mc` | milésimas de °C, solo lectura | Se mide mientras transmite; si no, queda la última medida |
+| `gain` | Q4 (16 = 1×), solo lectura | La ganancia lineal, para VIN |
+| `horizontal_blanking`, `pixel_rate` | solo lectura | Información de temporización |
+
+```bash
+SD=/dev/v4l-subdev0
+v4l2-ctl -d $SD -c exposure=20,analogue_gain=180     # 0,3 ms y 18 dB, en el mismo cuadro
+v4l2-ctl -d /dev/video8 --set-input=0 --set-fmt-video=width=1456,height=1088,pixelformat=RG10
+v4l2-ctl -d $SD -c vertical_blanking=1162            # 30 fps con el modo completo ya elegido
+v4l2-ctl -d $SD -C temperature_mc
+```
+
+Los cambios en vivo entran unos 2 cuadros después de pedirlos. Al bajar la ganancia, el nivel de negro automático del sensor tarda unos 8 cuadros en reacomodarse (~1 cuenta de 1023).
+
 ### Parámetros del módulo
 
-Se pueden cambiar entre capturas en `/sys/module/imx296_mipi/parameters/`; se aplican al arrancar la captura. Un valor fuera de rango se rechaza con un error, tanto en `insmod` como al escribirlo en `/sys`.
+Son los valores iniciales de los controles y solo se leen al cargar el módulo (desde v3, después se usan los controles). Un valor fuera de rango se rechaza en `insmod`.
 
 | Parámetro | Por defecto | Qué hace |
 |---|---|---|
 | `rotation` | 180 | 180 = espejo horizontal y vertical en el sensor, que va montado invertido en la cámara GS (igual que `rotation = <180>` en el overlay de Raspberry Pi). 0 = sin espejo |
-| `exposure_us` | 10000 | Exposición en µs, de 1 a 1 000 000. Se recorta al máximo del modo (~16 650 a 60 fps) y se ajusta en pasos de una línea (14,8 µs) |
-| `gain_db10` | 0 | Ganancia analógica en pasos de 0,1 dB, de 0 a 480 |
-| `trigger_mode` | 0 | 0 o 1. 1 = disparo externo por XTR, como en el driver de Raspberry Pi (sin probar) |
-
-La exposición y la ganancia se fijan por parámetros porque, con `isp_used = 1` (el valor del device tree de la placa), VIN manda los controles V4L2 de exposición y ganancia al ISP y no al sensor.
+| `exposure_us` | 10000 | Exposición inicial en µs, de 1 a 1 000 000, en pasos de una línea (14,8 µs) |
+| `gain_db10` | 0 | Ganancia analógica inicial en pasos de 0,1 dB, de 0 a 480 |
+| `trigger_mode` | 0 | 0 o 1, se aplica al arrancar cada captura. 1 = disparo externo por XTR, como en el driver de Raspberry Pi (sin probar) |
 
 ### Scripts
 
-- `scripts/placa/captura.sh`: carga y captura paso a paso, revisando la microSD antes y después. Por ejemplo, `sudo CAM=2 bash captura.sh carga` y luego `captura` o `video <nombre> [cuadros]`. El video se graba en `/dev/shm`, porque a 60 fps son unos 190 MB/s, más de lo que aguanta la microSD.
+- `scripts/placa/captura.sh`: carga y captura paso a paso, revisando la microSD antes y después. Por ejemplo, `sudo CAM=2 bash captura.sh carga` y luego `controles`, `captura` o `video <nombre> [cuadros]`; el modo se elige con `ANCHO` y `ALTO` (`sudo ANCHO=728 ALTO=544 bash captura.sh captura`). El video se graba en `/dev/shm`, porque a 60 fps son unos 190 MB/s, más de lo que aguanta la microSD.
+- `scripts/placa/prueba_modos.sh`: mide los fps de cada modo (y a 30 fps con VBLANK) con las marcas de tiempo, los compara con los calculados y comprueba que la exposición máxima dé imagen.
+- `scripts/placa/analizar_raw.py` (numpy): media, mínimo y máximo por cuadro, y los valores distintos (`--valores`, para el patrón de prueba).
 - `scripts/placa/raw16_a_gris8.py` (numpy) y `scripts/pc/gris8_a_mp4.sh` (ffmpeg): video MP4 y fotos.
 - `scripts/pc/raw_a_png.py` (sin dependencias): RAW → PNG, `py -3 raw_a_png.py cam2.raw 1456 1088 cam2`.
 - `scripts/placa/info_placa.sh` y `scripts/placa/prueba_i2c.sh`: inventario y prueba de I2C sin VIN. Para CAM2, `sudo ./prueba_i2c.sh 9 PE10`; para CAM1, `sudo ./prueba_i2c.sh 11 PE6`.

@@ -1,7 +1,9 @@
 """Analiza una captura RAW10 desempaquetada (16 bits por píxel, little-endian) y genera PNG en gris.
 
-Uso: py -3 -I raw_a_png.py <archivo.raw> <ancho> <alto> <salida_prefijo> [--rot180]
-  --rot180: gira la imagen 180° (el sensor de la cámara GS va montado invertido).
+Uso: py -3 -I raw_a_png.py <archivo.raw> <ancho> <alto> <salida_prefijo> [--rot180] [--tam-cuadro=B]
+  --rot180:       gira la imagen 180° (el sensor de la cámara GS va montado invertido).
+  --tam-cuadro=B: bytes de cada cuadro en el archivo, si VIN agrega relleno al final (Size
+                  Image de --get-fmt-video; en 728x544 son 800768 en vez de 792064).
 Sin dependencias externas (array + zlib).
 """
 import sys, zlib, struct
@@ -11,9 +13,10 @@ args = [a for a in sys.argv[1:] if not a.startswith("--")]
 ROT180 = "--rot180" in sys.argv
 ruta, W, H, pref = args[0], int(args[1]), int(args[2]), args[3]
 tam = W * H * 2
+paso = next((int(a.split("=", 1)[1]) for a in sys.argv if a.startswith("--tam-cuadro=")), tam)
 datos = open(ruta, "rb").read()
-n = len(datos) // tam
-print(f"archivo: {len(datos)} bytes -> {n} cuadros de {W}x{H} (16 bits/píxel)")
+n = len(datos) // paso
+print(f"archivo: {len(datos)} bytes -> {n} cuadros de {W}x{H} (16 bits/píxel, {paso} bytes por cuadro)")
 
 
 def png_gris(nombre, px8, w, h):
@@ -30,7 +33,7 @@ def png_gris(nombre, px8, w, h):
 
 for i in sorted({0, n - 1}):
     px = array("H")
-    px.frombytes(datos[i * tam:(i + 1) * tam])
+    px.frombytes(datos[i * paso:i * paso + tam])
     if sys.byteorder != "little":
         px.byteswap()
     if ROT180:

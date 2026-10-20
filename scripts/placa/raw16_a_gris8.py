@@ -4,7 +4,9 @@
 Corre en la placa (numpy). Niveles automáticos: negro = percentil 0,5 y blanco = percentil
 99,5 de una muestra de cuadros, más una curva gamma suave para que la escena se vea natural.
 
-Uso: python3 raw16_a_gris8.py <entrada.raw> <salida.gray8> [ancho] [alto] [gamma]
+Uso: python3 raw16_a_gris8.py <entrada.raw> <salida.gray8> [ancho] [alto] [gamma] [bytes_cuadro]
+  bytes_cuadro: bytes de cada cuadro en el archivo, si VIN agrega relleno al final (728x544:
+  800768 en vez de 792064). Por defecto, ancho * alto * 2.
 """
 import sys
 import numpy as np
@@ -13,10 +15,11 @@ ent, sal = sys.argv[1], sys.argv[2]
 W = int(sys.argv[3]) if len(sys.argv) > 3 else 1456
 H = int(sys.argv[4]) if len(sys.argv) > 4 else 1088
 GAMMA = float(sys.argv[5]) if len(sys.argv) > 5 else 0.7
+PASO = int(sys.argv[6]) // 2 if len(sys.argv) > 6 else W * H
 
 cuadros = np.memmap(ent, dtype="<u2", mode="r")
-n = cuadros.size // (W * H)
-cuadros = cuadros[: n * W * H].reshape(n, H, W)
+n = cuadros.size // PASO
+cuadros = cuadros[: n * PASO].reshape(n, PASO)[:, : W * H].reshape(n, H, W)
 muestra = cuadros[:: max(1, n // 8), ::4, ::4].astype(np.float32)
 negro, blanco = np.percentile(muestra, [0.5, 99.5])
 blanco = max(blanco, negro + 1)
