@@ -1,5 +1,7 @@
 # Driver IMX296 para la Orange Pi Zero 3W (Allwinner A733)
 
+> **En breve:** este proyecto hace funcionar la Raspberry Pi Global Shutter Camera (Sony IMX296) en la Orange Pi Zero 3W, que de fábrica no la reconoce. El driver conecta el sensor con el framework de cámaras de Allwinner (VIN): lo detecta, entrega video RAW10 a 60 fps (100 fps en los modos reducidos) y permite ajustar en vivo la exposición, la ganancia y los fps. Un paquete `.deb` lo instala y carga las cámaras solas al arrancar. Es útil porque junta un obturador global, que da imágenes sin deformación aunque haya movimiento rápido, con una placa chica y barata: justo lo que necesita la visión estéreo de un dron.
+
 Driver VIN (el framework de cámaras de Allwinner) para la **Raspberry Pi Global Shutter Camera** (sensor Sony IMX296) en la **Orange Pi Zero 3W** (SoC Allwinner A733, familia `sun60iw2`), sobre la imagen oficial de Orange Pi con kernel 6.6. Es parte del Proyecto Ticanor: el par estéreo del subsistema de evasión de obstáculos de un dron.
 
 La imagen de Orange Pi solo soporta la cámara IMX219. El driver de la IMX296 del kernel principal identifica el sensor, pero VIN no trabaja con subdispositivos V4L2 estándar, así que no aparece ningún `/dev/video*`. Este repositorio trae un driver VIN propio, el overlay del device tree y las herramientas para compilarlo y probarlo.
